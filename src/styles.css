@@ -1,0 +1,70 @@
+:root {
+  background-color: transparent;
+  margin: 0;
+  padding: 0;
+  overflow: hidden; /* Hide scrollbars that might pop up */
+}
+
+body {
+  margin: 0;
+  padding: 0;
+  background-color: transparent;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  height: 100vh;
+  width: 100vw;
+  overflow: hidden;
+}
+
+/* Premium Glassmorphism & Glowing Orb Aesthetics */
+.orb {
+  position: relative;
+  width: 40px;
+  height: 40px;
+  background: radial-gradient(circle at 30% 30%, #4facfe, #00f2fe);
+  border-radius: 50%;
+  box-shadow: 0 0 20px #00f2fe, inset 0 0 10px #ffffff;
+  animation: pulse 2.5s infinite ease-in-out;
+  transition: transform 0.3s ease, filter 0.3s ease;
+  cursor: pointer;
+}
+
+/* Micro-animation when the user hovers over the AI */
+.orb:hover {
+  transform: scale(1.1);
+  box-shadow: 0 0 30px #00f2fe, inset 0 0 15px #ffffff;
+  filter: brightness(1.2);
+}
+
+/* A soft white highlight to make it look 3D and spherical */
+.inner-glow {
+  position: absolute;
+  top: 6px;
+  left: 6px;
+  width: 12px;
+  height: 12px;
+  background: white;
+  border-radius: 50%;
+  opacity: 0.8;
+  filter: blur(2px);
+}
+
+/* Breathing animation so it feels alive */
+@keyframes pulse {
+  0% { transform: scale(1); box-shadow: 0 0 15px #00f2fe; }
+  50% { transform: scale(1.05); box-shadow: 0 0 25px #4facfe; }
+}
+
+/* When the AI is activated via hotkey, it changes to an active listening state */
+.orb.listening {
+  background: radial-gradient(circle at 30% 30%, #ff4b2b, #ff416c);
+  box-shadow: 0 0 40px #ff416c, inset 0 0 20px #ffffff;
+  animation: pulse-active 1s infinite ease-in-out;
+}
+
+@keyframes pulse-active {
+  0% { transform: scale(1); box-shadow: 0 0 30px #ff416c; }
+  50% { transform: scale(1.15); box-shadow: 0 0 50px #ff4b2b; }
+  100% { transform: scale(1); box-shadow: 0 0 30px #ff416c; }
+}
