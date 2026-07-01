@@ -5,20 +5,73 @@ use std::thread;
 use std::time::Duration;
 
 #[tauri::command]
-fn greet(name: &str) -> String {
-    format!("Hello, {}! You've been greeted from Rust!", name)
+async fn process_audio(audio_base64: String, x: i32, y: i32) -> Result<(), String> {
+    println!("Received audio payload ({} bytes)! Mouse was at ({}, {})", audio_base64.len(), x, y);
+    // In the next step, we will send this audio to OpenAI Whisper!
+    Ok(())
 }
+
+use std::sync::{Arc, Mutex};
+use std::process::{Command, Child};
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    let recording_process = Arc::new(Mutex::new(None::<Child>));
+    
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
-                .with_handler(|app, _shortcut, event| {
+                .with_handler(move |app, _shortcut, event| {
                     if event.state == ShortcutState::Pressed {
-                        println!("HOTKEY ACTIVATED! Waking up AI...");
-                        let _ = app.emit("hotkey-pressed", ());
+                        let mut rec = recording_process.lock().unwrap();
+                        
+                        if rec.is_none() {
+                            // START RECORDING
+                            println!("HOTKEY TOGGLED! Starting microphone via native OS...");
+                            let js_code = "document.getElementById('ai-companion').classList.add('listening');";
+                            if let Some(window) = app.get_webview_window("main") {
+                                let _ = window.eval(js_code);
+                            }
+                            
+                            // Spawn native Linux arecord process to bypass ALL browser permissions!
+                            if let Ok(child) = Command::new("arecord")
+                                .args(["-f", "S16_LE", "-c", "1", "-r", "16000", "/tmp/clickyai_audio.wav"])
+                                .spawn() {
+                                    *rec = Some(child);
+                            }
+                        } else {
+                            // STOP RECORDING
+                            println!("HOTKEY TOGGLED! Stopping microphone & capturing screen...");
+                            
+                            let js_code = "document.getElementById('ai-companion').classList.remove('listening');";
+                            if let Some(window) = app.get_webview_window("main") {
+                                let _ = window.eval(js_code);
+                            }
+                            
+                            // Kill the native recording process
+                            if let Some(mut child) = rec.take() {
+                                let _ = child.kill();
+                                let _ = child.wait();
+                                if let Ok(audio_bytes) = std::fs::read("/tmp/clickyai_audio.wav") {
+                                    println!("Successfully recorded {} bytes of audio natively!", audio_bytes.len());
+                                }
+                            }
+                            
+                            let device_state = DeviceState::new();
+                            let mouse = device_state.get_mouse();
+                            let (cursor_x, cursor_y) = mouse.coords;
+                            
+                            if let Ok(screens) = screenshots::Screen::all() {
+                                if let Some(screen) = screens.first() {
+                                    if let Ok(image) = screen.capture() {
+                                        let path = "/tmp/clickyai_vision.png";
+                                        let _ = image.save(path);
+                                        println!("Vision captured! Cursor at: ({}, {})", cursor_x, cursor_y);
+                                    }
+                                }
+                            }
+                        }
                     }
                 })
                 .build(),
@@ -29,6 +82,9 @@ pub fn run() {
             let _ = app.global_shortcut().register(hotkey);
 
             let main_window = app.get_webview_window("main").unwrap();
+            
+            // This is the magic line that allows you to click THROUGH the overlay!
+            let _ = main_window.set_ignore_cursor_events(true);
             
             // Spawn a background thread to continuously track the mouse
             thread::spawn(move || {
@@ -52,7 +108,7 @@ pub fn run() {
             
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![greet])
+        .invoke_handler(tauri::generate_handler![process_audio])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
