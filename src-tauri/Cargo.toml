@@ -26,6 +26,7 @@ device_query = "4.0.1"
 tauri-plugin-global-shortcut = "2.3.2"
 screenshots = "0.8.10"
 dotenvy = "0.15.7"
-reqwest = { version = "0.13.4", features = ["json", "rustls"] }
+reqwest = { version = "0.13.4", features = ["json", "multipart", "rustls"] }
 base64 = "0.22.1"
+urlencoding = "2.1.3"
 

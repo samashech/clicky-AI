@@ -1,22 +1,73 @@
 use tauri::{Manager, Emitter};
 use device_query::{DeviceQuery, DeviceState, MouseState};
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
-use std::thread;
-use std::time::Duration;
-
-#[tauri::command]
-async fn process_audio(audio_base64: String, x: i32, y: i32) -> Result<(), String> {
-    println!("Received audio payload ({} bytes)! Mouse was at ({}, {})", audio_base64.len(), x, y);
-    // In the next step, we will send this audio to OpenAI Whisper!
-    Ok(())
-}
-
 use std::sync::{Arc, Mutex};
 use std::process::{Command, Child};
+use std::time::Duration;
+use std::thread;
+use base64::{Engine as _, engine::general_purpose};
+
+async fn ask_gemini(user_text: &str, x: i32, y: i32) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    let api_key = std::env::var("GEMINI_API_KEY")?;
+    let url = format!("https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent?key={}", api_key);
+    
+    let client = reqwest::Client::new();
+    
+    let image_bytes = std::fs::read("/tmp/clickyai_vision.png")?;
+    let base64_image = general_purpose::STANDARD.encode(&image_bytes);
+    
+    // We strictly limit Gemini's response length so it fits entirely into the Google Translate TTS engine!
+    let prompt = format!("You are an AI desktop tutor. The user's mouse is currently at X: {}, Y: {}. The user typed: '{}'. Look at the screenshot (a 600x600 region around their mouse) to understand their context. Give a brief, helpful, step-by-step answer as if speaking. KEEP IT UNDER 150 CHARACTERS AND DO NOT USE MARKDOWN.", x, y, user_text);
+    
+    let payload = serde_json::json!({
+        "contents": [{
+            "parts": [
+                { "text": prompt },
+                {
+                    "inline_data": {
+                        "mime_type": "image/png",
+                        "data": base64_image
+                    }
+                }
+            ]
+        }]
+    });
+    
+    let res = client.post(&url)
+        .json(&payload)
+        .send()
+        .await?;
+        
+    let json: serde_json::Value = res.json().await?;
+    if let Some(text) = json["candidates"][0]["content"]["parts"][0]["text"].as_str() {
+        Ok(text.to_string())
+    } else {
+        Err(format!("Gemini API Error: {}", json.to_string()).into())
+    }
+}
+
+async fn play_tts(text: &str) {
+    let client = reqwest::Client::new();
+    // High-quality Google Translate TTS!
+    let url = format!("https://translate.google.com/translate_tts?ie=UTF-8&q={}&tl=en&client=tw-ob", urlencoding::encode(text));
+    
+    if let Ok(res) = client.get(&url).send().await {
+        if let Ok(audio_bytes) = res.bytes().await {
+            let _ = std::fs::write("/tmp/clickyai_response.mp3", audio_bytes);
+            
+            // Play the high-quality MP3 using ffplay natively!
+            let _ = Command::new("ffplay")
+                .arg("-nodisp")
+                .arg("-autoexit")
+                .arg("/tmp/clickyai_response.mp3")
+                .output();
+        }
+    }
+}
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    let recording_process = Arc::new(Mutex::new(None::<Child>));
+    let is_busy = Arc::new(Mutex::new(false));
     
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
@@ -24,91 +75,105 @@ pub fn run() {
             tauri_plugin_global_shortcut::Builder::new()
                 .with_handler(move |app, _shortcut, event| {
                     if event.state == ShortcutState::Pressed {
-                        let mut rec = recording_process.lock().unwrap();
+                        let mut busy = is_busy.lock().unwrap();
                         
-                        if rec.is_none() {
-                            // START RECORDING
-                            println!("HOTKEY TOGGLED! Starting microphone via native OS...");
+                        if !*busy {
+                            *busy = true;
+                            
+                            // Turn orb red
                             let js_code = "document.getElementById('ai-companion').classList.add('listening');";
                             if let Some(window) = app.get_webview_window("main") {
                                 let _ = window.eval(js_code);
-                            }
-                            
-                            // Spawn native Linux arecord process to bypass ALL browser permissions!
-                            if let Ok(child) = Command::new("arecord")
-                                .args(["-f", "S16_LE", "-c", "1", "-r", "16000", "/tmp/clickyai_audio.wav"])
-                                .spawn() {
-                                    *rec = Some(child);
-                            }
-                        } else {
-                            // STOP RECORDING
-                            println!("HOTKEY TOGGLED! Stopping microphone & capturing screen...");
-                            
-                            let js_code = "document.getElementById('ai-companion').classList.remove('listening');";
-                            if let Some(window) = app.get_webview_window("main") {
-                                let _ = window.eval(js_code);
-                            }
-                            
-                            // Kill the native recording process
-                            if let Some(mut child) = rec.take() {
-                                let _ = child.kill();
-                                let _ = child.wait();
-                                if let Ok(audio_bytes) = std::fs::read("/tmp/clickyai_audio.wav") {
-                                    println!("Successfully recorded {} bytes of audio natively!", audio_bytes.len());
-                                }
                             }
                             
                             let device_state = DeviceState::new();
                             let mouse = device_state.get_mouse();
                             let (cursor_x, cursor_y) = mouse.coords;
                             
+                            // 1. Capture 600x600 region around mouse instead of full screen
                             if let Ok(screens) = screenshots::Screen::all() {
                                 if let Some(screen) = screens.first() {
-                                    if let Ok(image) = screen.capture() {
-                                        let path = "/tmp/clickyai_vision.png";
-                                        let _ = image.save(path);
-                                        println!("Vision captured! Cursor at: ({}, {})", cursor_x, cursor_y);
+                                    let mut cap_x = cursor_x - 300;
+                                    let mut cap_y = cursor_y - 300;
+                                    if cap_x < 0 { cap_x = 0; }
+                                    if cap_y < 0 { cap_y = 0; }
+                                    
+                                    if let Ok(image) = screen.capture_area(cap_x, cap_y, 600, 600) {
+                                        let _ = image.save("/tmp/clickyai_vision.png");
+                                        println!("600x600 Vision captured around mouse!");
                                     }
                                 }
                             }
+                            
+                            // 2. Ask user for text input since Mic is broken, using a native Linux KDE popup!
+                            let kdialog_output = Command::new("kdialog")
+                                .arg("--inputbox")
+                                .arg("Ask ClickyAI a question about the area under your mouse:")
+                                .output();
+                                
+                            let mut user_text = String::new();
+                            if let Ok(output) = kdialog_output {
+                                user_text = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                            }
+                            
+                            // Turn orb blue
+                            let js_code = "document.getElementById('ai-companion').classList.remove('listening');";
+                            if let Some(window) = app.get_webview_window("main") {
+                                let _ = window.eval(js_code);
+                            }
+                            
+                            if user_text.is_empty() {
+                                println!("No text entered, aborting.");
+                                *busy = false;
+                                return;
+                            }
+                            
+                            // LOAD ENV VARIABLES
+                            let _ = dotenvy::dotenv();
+                            
+                            let busy_clone = is_busy.clone();
+                            tauri::async_runtime::spawn(async move {
+                                println!("Asking Gemini...");
+                                match ask_gemini(&user_text, cursor_x, cursor_y).await {
+                                    Ok(response) => {
+                                        println!("============================");
+                                        println!("GEMINI SAYS: {}", response);
+                                        println!("============================");
+                                        
+                                        println!("Generating High-Quality Speech via Google TTS...");
+                                        play_tts(&response).await;
+                                    }
+                                    Err(e) => println!("Gemini failed: {:?}", e),
+                                }
+                                
+                                *busy_clone.lock().unwrap() = false;
+                            });
                         }
                     }
                 })
                 .build(),
         )
         .setup(|app| {
-            // Changed hotkey to Alt+X because Krohnkite/KDE might be intercepting Ctrl+Shift+Space
             let hotkey = "alt+x".parse::<Shortcut>().unwrap();
             let _ = app.global_shortcut().register(hotkey);
 
             let main_window = app.get_webview_window("main").unwrap();
-            
-            // This is the magic line that allows you to click THROUGH the overlay!
             let _ = main_window.set_ignore_cursor_events(true);
             
-            // Spawn a background thread to continuously track the mouse
             thread::spawn(move || {
                 let device_state = DeviceState::new();
-                
                 loop {
-                    // 1. Mouse Tracking
                     let mouse: MouseState = device_state.get_mouse();
                     let (x, y) = mouse.coords;
-                    
-                    // We shrunk the window back down to 50x50. 
-                    // So we subtract 5 to keep the 40x40 orb centered on the cursor!
                     let _ = main_window.set_position(
                         tauri::Position::Physical(tauri::PhysicalPosition::new(x - 5, y - 5))
                     );
-                    
-                    // Sleep for 16 milliseconds to run at roughly 60 Frames Per Second
                     thread::sleep(Duration::from_millis(16));
                 }
             });
             
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![process_audio])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
