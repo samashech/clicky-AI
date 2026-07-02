@@ -10,13 +10,42 @@
     "withGlobalTauri": true,
     "windows": [
       {
+        "label": "main",
+        "url": "index.html",
         "title": "tauri-app",
         "width": 50,
         "height": 50,
         "transparent": true,
         "decorations": false,
         "alwaysOnTop": true,
-        "skipTaskbar": true
+        "skipTaskbar": true,
+        "visible": true
+      },
+      {
+        "label": "viewfinder",
+        "url": "viewfinder.html",
+        "title": "viewfinder",
+        "width": 600,
+        "height": 600,
+        "transparent": true,
+        "decorations": false,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "visible": true
+      },
+      {
+        "label": "highlight",
+        "url": "highlight.html",
+        "title": "highlight",
+        "width": 60,
+        "height": 60,
+        "x": -9999,
+        "y": -9999,
+        "transparent": true,
+        "decorations": false,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "visible": true
       }
     ],
     "security": {

@@ -68,3 +68,15 @@ body {
   50% { transform: scale(1.15); box-shadow: 0 0 50px #ff4b2b; }
   100% { transform: scale(1); box-shadow: 0 0 30px #ff416c; }
 }
+
+/* When the AI is waiting for a user click in guide mode */
+.orb.guiding {
+  background: radial-gradient(circle at 30% 30%, #f6d365, #fda085);
+  box-shadow: 0 0 30px #fda085, inset 0 0 15px #ffffff;
+  animation: pulse-guide 1.5s infinite ease-in-out;
+}
+@keyframes pulse-guide {
+  0% { transform: scale(1); box-shadow: 0 0 20px #fda085; }
+  50% { transform: scale(1.1); box-shadow: 0 0 40px #f6d365; }
+  100% { transform: scale(1); box-shadow: 0 0 20px #fda085; }
+}
