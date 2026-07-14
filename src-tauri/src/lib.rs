@@ -7,7 +7,7 @@ use std::time::Duration;
 use std::thread;
 use base64::{Engine as _, engine::general_purpose};
 
-async fn run_ai_pipeline(app: AppHandle, user_text: Option<String>, x: i32, y: i32, is_guiding: Arc<Mutex<bool>>, is_busy: Arc<Mutex<bool>>) {
+async fn run_ai_pipeline(app: AppHandle, user_text: Option<String>, has_audio: bool, x: i32, y: i32, is_busy: Arc<Mutex<bool>>) {
     // 1. Capture Full Vision
     if let Ok(screens) = screenshots::Screen::all() {
         if let Some(screen) = screens.first() {
@@ -17,13 +17,6 @@ async fn run_ai_pipeline(app: AppHandle, user_text: Option<String>, x: i32, y: i
         }
     }
     
-    // 2. Prepare Prompt (Full screen context for max accuracy)
-    let prompt = if let Some(text) = user_text {
-        format!("You are an AI desktop tutor. The user's mouse is at X: {}, Y: {}. They typed: '{}'. Look at the full screen screenshot. If it requires multiple steps, give ONLY THE VERY FIRST STEP, and end your response EXACTLY with [GUIDE_MODE_ON]. If it is a simple question requiring no clicks, answer it and end with [GUIDE_MODE_OFF]. Keep it under 150 chars. IMPORTANT: If you want the user to click something, you MUST output the exact ABSOLUTE pixel coordinates of the target element based on the full screen image. Output these coordinates at the very end of your response in the exact format: [X, Y]. Do not use markdown.", x, y, text)
-    } else {
-        format!("You are in Guide Mode. The user just clicked their mouse at X: {}, Y: {}. Look at the new full screen screenshot. Did they perform the previous step correctly? If yes, give the NEXT step and end with [GUIDE_MODE_ON]. If no, correct them and end with [GUIDE_MODE_ON]. If the task is finished, congratulate them and end with [GUIDE_MODE_OFF]. Keep it under 150 chars. IMPORTANT: If you want the user to click something, you MUST output the exact ABSOLUTE pixel coordinates of the target element based on the full screen image. Output these coordinates at the very end of your response in the exact format: [X, Y]. Do not use markdown.", x, y)
-    };
-    
     let api_key = match std::env::var("GEMINI_API_KEY") {
         Ok(k) => k,
         Err(_) => {
@@ -31,18 +24,48 @@ async fn run_ai_pipeline(app: AppHandle, user_text: Option<String>, x: i32, y: i
             return;
         }
     };
-    let url = format!("https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={}", api_key);
     
+    let url = format!("https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={}", api_key);
     let client = reqwest::Client::new();
+    
     let image_bytes = std::fs::read("/tmp/clickyai_vision.png").unwrap_or_default();
     let base64_image = general_purpose::STANDARD.encode(&image_bytes);
     
+    let mut parts = vec![];
+    
+    // Core Instructions
+    let prompt = format!("You are a hyper-intelligent desktop AI assistant. The user's mouse cursor is currently located at exact screen coordinates X: {}, Y: {}. Look at the attached full-screen screenshot. If the user asks a question, answer it by looking precisely at what their mouse is pointing at! Keep your response brief, helpful, and under 150 characters as it will be spoken out loud. Do not use markdown.", x, y);
+    parts.push(serde_json::json!({ "text": prompt }));
+    
+    // Add Text Input if any
+    if let Some(text) = user_text {
+        parts.push(serde_json::json!({ "text": format!("The user typed this question: {}", text) }));
+    }
+    
+    // Add Image
+    parts.push(serde_json::json!({
+        "inline_data": {
+            "mime_type": "image/png",
+            "data": base64_image
+        }
+    }));
+    
+    // Add Audio Input if any
+    if has_audio {
+        if let Ok(audio_bytes) = std::fs::read("/tmp/clickyai_audio.wav") {
+            let base64_audio = general_purpose::STANDARD.encode(&audio_bytes);
+            parts.push(serde_json::json!({
+                "inline_data": {
+                    "mime_type": "audio/wav",
+                    "data": base64_audio
+                }
+            }));
+        }
+    }
+    
     let payload = serde_json::json!({
         "contents": [{
-            "parts": [
-                { "text": prompt },
-                { "inline_data": { "mime_type": "image/png", "data": base64_image } }
-            ]
+            "parts": parts
         }]
     });
     
@@ -58,64 +81,19 @@ async fn run_ai_pipeline(app: AppHandle, user_text: Option<String>, x: i32, y: i
     }
     
     if response_text.is_empty() {
-        *is_guiding.lock().unwrap() = false;
         if let Some(w) = app.get_webview_window("main") { 
             let _ = w.eval("document.getElementById('ai-companion').className = 'orb';"); 
         }
-        if let Some(w) = app.get_webview_window("highlight") { let _ = w.hide(); }
         *is_busy.lock().unwrap() = false;
         return;
     }
     
-    // Parse Coordinates for Highlight Window [X, Y]
-    let mut highlight_coords = None;
-    if let Some(start) = response_text.rfind('[') {
-        if let Some(end) = response_text[start..].find(']') {
-            let coords_str = &response_text[start+1 .. start+end];
-            let parts: Vec<&str> = coords_str.split(',').collect();
-            if parts.len() == 2 {
-                if let (Ok(hx), Ok(hy)) = (parts[0].trim().parse::<i32>(), parts[1].trim().parse::<i32>()) {
-                    highlight_coords = Some((hx, hy));
-                    response_text = response_text[..start].trim().to_string();
-                }
-            }
-        }
-    }
-    
     println!("============================");
     println!("GEMINI SAYS: {}", response_text);
-    println!("HIGHLIGHT COORDS: {:?}", highlight_coords);
     println!("============================");
     
-    if let Some((abs_x, abs_y)) = highlight_coords {
-        // Absolute Screen Position (Image is now full screen, so coords are already absolute!)
-        if let Some(w) = app.get_webview_window("highlight") {
-            let _ = w.set_position(tauri::Position::Physical(tauri::PhysicalPosition::new(abs_x - 30, abs_y - 30)));
-            let _ = w.show();
-        }
-    } else {
-        if let Some(w) = app.get_webview_window("highlight") { let _ = w.hide(); }
-    }
-    
-    // 3. Handle Guide Mode State
-    let mut turn_guide_on = false;
-    if response_text.contains("[GUIDE_MODE_ON]") {
-        turn_guide_on = true;
-        response_text = response_text.replace("[GUIDE_MODE_ON]", "");
-    }
-    if response_text.contains("[GUIDE_MODE_OFF]") {
-        turn_guide_on = false;
-        response_text = response_text.replace("[GUIDE_MODE_OFF]", "");
-    }
-    
-    *is_guiding.lock().unwrap() = turn_guide_on;
-    
-    if turn_guide_on {
-        let js = "document.getElementById('ai-companion').className = 'orb guiding';";
-        if let Some(w) = app.get_webview_window("main") { let _ = w.eval(js); }
-    } else {
-        let js = "document.getElementById('ai-companion').className = 'orb';";
-        if let Some(w) = app.get_webview_window("main") { let _ = w.eval(js); }
+    if let Some(w) = app.get_webview_window("main") { 
+        let _ = w.eval("document.getElementById('ai-companion').className = 'orb';"); 
     }
     
     // 4. TTS
@@ -133,10 +111,7 @@ async fn run_ai_pipeline(app: AppHandle, user_text: Option<String>, x: i32, y: i
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let is_busy = Arc::new(Mutex::new(false));
-    let is_guiding = Arc::new(Mutex::new(false));
-    
     let is_busy_shortcut = is_busy.clone();
-    let is_guiding_shortcut = is_guiding.clone();
     
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
@@ -148,40 +123,88 @@ pub fn run() {
                         if !*busy {
                             *busy = true;
                             
-                            let js_code = "document.getElementById('ai-companion').className = 'orb listening';";
-                            if let Some(window) = app.get_webview_window("main") { let _ = window.eval(js_code); }
-                            
                             let device_state = DeviceState::new();
                             let mouse = device_state.get_mouse();
                             let (cursor_x, cursor_y) = mouse.coords;
                             
-                            let kdialog_output = Command::new("kdialog")
-                                .arg("--inputbox")
-                                .arg("Ask ClickyAI a question about your screen:")
+                            // 1. Pop up a Menu to choose input type
+                            let kdialog_choice = Command::new("kdialog")
+                                .arg("--menu")
+                                .arg("How would you like to ask ClickyAI?")
+                                .arg("type")
+                                .arg("Type Text")
+                                .arg("speak")
+                                .arg("Record Audio")
                                 .output();
                                 
-                            let mut user_text = String::new();
-                            if let Ok(output) = kdialog_output {
-                                user_text = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                            let mut choice = String::new();
+                            if let Ok(output) = kdialog_choice {
+                                choice = String::from_utf8_lossy(&output.stdout).trim().to_string();
                             }
                             
-                            if user_text.is_empty() {
-                                println!("No text entered, aborting.");
-                                let js = "document.getElementById('ai-companion').className = 'orb';";
-                                if let Some(window) = app.get_webview_window("main") { let _ = window.eval(js); }
+                            if choice.is_empty() {
                                 *busy = false;
                                 return;
                             }
                             
+                            let mut user_text = None;
+                            let mut has_audio = false;
+                            
+                            // 2. Handle specific input type
+                            if choice == "type" {
+                                let kdialog_input = Command::new("kdialog")
+                                    .arg("--inputbox")
+                                    .arg("Type your question:")
+                                    .output();
+                                    
+                                if let Ok(output) = kdialog_input {
+                                    let txt = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                                    if txt.is_empty() {
+                                        *busy = false;
+                                        return;
+                                    }
+                                    user_text = Some(txt);
+                                } else {
+                                    *busy = false;
+                                    return;
+                                }
+                            } else if choice == "speak" {
+                                // Start recording audio in background
+                                let mut arecord = Command::new("arecord")
+                                    .arg("-f")
+                                    .arg("S16_LE")
+                                    .arg("-r")
+                                    .arg("16000")
+                                    .arg("-c")
+                                    .arg("1")
+                                    .arg("/tmp/clickyai_audio.wav")
+                                    .spawn()
+                                    .expect("Failed to start arecord");
+                                    
+                                // Block the UI with a native popup to stop recording
+                                let _ = Command::new("kdialog")
+                                    .arg("--msgbox")
+                                    .arg("🔴 Recording your voice...\n\nPress OK to stop recording and send to AI!")
+                                    .output();
+                                    
+                                // Kill arecord when the user dismisses the box!
+                                let _ = arecord.kill();
+                                let _ = arecord.wait();
+                                has_audio = true;
+                            }
+                            
+                            // Visual indicator for listening/processing
+                            let js_code = "document.getElementById('ai-companion').className = 'orb listening';";
+                            if let Some(window) = app.get_webview_window("main") { let _ = window.eval(js_code); }
+                            
                             let _ = dotenvy::dotenv();
                             
                             let app_clone = app.clone();
-                            let guide_clone = is_guiding_shortcut.clone();
                             let busy_clone = is_busy_shortcut.clone();
                             
                             tauri::async_runtime::spawn(async move {
-                                println!("Starting AI Pipeline (Full Screen Mode)...");
-                                run_ai_pipeline(app_clone, Some(user_text), cursor_x, cursor_y, guide_clone, busy_clone).await;
+                                println!("Starting AI Pipeline (Single Shot)...");
+                                run_ai_pipeline(app_clone, user_text, has_audio, cursor_x, cursor_y, busy_clone).await;
                             });
                         }
                     }
@@ -193,54 +216,18 @@ pub fn run() {
             let _ = app.global_shortcut().register(hotkey);
 
             if let Some(w) = app.get_webview_window("main") { let _ = w.set_ignore_cursor_events(true); }
-            if let Some(w) = app.get_webview_window("highlight") { let _ = w.set_ignore_cursor_events(true); }
             
-            let is_busy_thread = is_busy.clone();
-            let is_guiding_thread = is_guiding.clone();
             let app_handle_thread = app.handle().clone();
             
+            // Minimal loop just to animate the orb to follow the cursor!
             thread::spawn(move || {
                 let device_state = DeviceState::new();
-                let mut was_left_pressed = false;
-                
                 loop {
                     let mouse: MouseState = device_state.get_mouse();
                     let (x, y) = mouse.coords;
                     
                     if let Some(w) = app_handle_thread.get_webview_window("main") {
                         let _ = w.set_position(tauri::Position::Physical(tauri::PhysicalPosition::new(x - 5, y - 5)));
-                    }
-                    
-                    let left_pressed = mouse.button_pressed.get(1).copied().unwrap_or(false);
-                    
-                    if left_pressed && !was_left_pressed {
-                        was_left_pressed = true;
-                    } else if !left_pressed && was_left_pressed {
-                        was_left_pressed = false;
-                        
-                        let guiding = *is_guiding_thread.lock().unwrap();
-                        let mut busy = is_busy_thread.lock().unwrap();
-                        
-                        if guiding && !*busy {
-                            *busy = true;
-                            
-                            if let Some(w) = app_handle_thread.get_webview_window("highlight") { let _ = w.hide(); }
-                            if let Some(w) = app_handle_thread.get_webview_window("main") {
-                                let _ = w.eval("document.getElementById('ai-companion').className = 'orb listening';");
-                            }
-                            
-                            thread::sleep(Duration::from_millis(500));
-                            
-                            let _ = dotenvy::dotenv();
-                            let app_clone = app_handle_thread.clone();
-                            let guide_clone = is_guiding_thread.clone();
-                            let busy_clone = is_busy_thread.clone();
-                            
-                            println!("Mouse Click Detected! Continuing Guide Mode...");
-                            tauri::async_runtime::spawn(async move {
-                                run_ai_pipeline(app_clone, None, x, y, guide_clone, busy_clone).await;
-                            });
-                        }
                     }
                     
                     thread::sleep(Duration::from_millis(16));

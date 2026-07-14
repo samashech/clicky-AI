@@ -20,20 +20,6 @@
         "alwaysOnTop": true,
         "skipTaskbar": true,
         "visible": true
-      },
-      {
-        "label": "highlight",
-        "url": "highlight.html",
-        "title": "highlight",
-        "width": 60,
-        "height": 60,
-        "x": -9999,
-        "y": -9999,
-        "transparent": true,
-        "decorations": false,
-        "alwaysOnTop": true,
-        "skipTaskbar": true,
-        "visible": true
       }
     ],
     "security": {
