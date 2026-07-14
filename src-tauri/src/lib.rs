@@ -8,24 +8,20 @@ use std::thread;
 use base64::{Engine as _, engine::general_purpose};
 
 async fn run_ai_pipeline(app: AppHandle, user_text: Option<String>, x: i32, y: i32, is_guiding: Arc<Mutex<bool>>, is_busy: Arc<Mutex<bool>>) {
-    // 1. Capture Vision
+    // 1. Capture Full Vision
     if let Ok(screens) = screenshots::Screen::all() {
         if let Some(screen) = screens.first() {
-            let mut cap_x = x - 300;
-            let mut cap_y = y - 300;
-            if cap_x < 0 { cap_x = 0; }
-            if cap_y < 0 { cap_y = 0; }
-            if let Ok(image) = screen.capture_area(cap_x, cap_y, 600, 600) {
+            if let Ok(image) = screen.capture() {
                 let _ = image.save("/tmp/clickyai_vision.png");
             }
         }
     }
     
-    // 2. Prepare Prompt (We added strict coordinate instructions!)
+    // 2. Prepare Prompt (Full screen context for max accuracy)
     let prompt = if let Some(text) = user_text {
-        format!("You are an AI desktop tutor. The user's mouse is at X: {}, Y: {}. They typed: '{}'. Look at the 600x600 screenshot around their mouse. If it requires multiple steps, give ONLY THE VERY FIRST STEP, and end your response EXACTLY with [GUIDE_MODE_ON]. If it is a simple question requiring no clicks, answer it and end with [GUIDE_MODE_OFF]. Keep it under 150 chars. IMPORTANT: If you want the user to click something, you MUST output the exact pixel coordinates of the target element based on the 600x600 image provided. Output these coordinates at the very end of your response in the exact format: [X, Y]. Do not use markdown.", x, y, text)
+        format!("You are an AI desktop tutor. The user's mouse is at X: {}, Y: {}. They typed: '{}'. Look at the full screen screenshot. If it requires multiple steps, give ONLY THE VERY FIRST STEP, and end your response EXACTLY with [GUIDE_MODE_ON]. If it is a simple question requiring no clicks, answer it and end with [GUIDE_MODE_OFF]. Keep it under 150 chars. IMPORTANT: If you want the user to click something, you MUST output the exact ABSOLUTE pixel coordinates of the target element based on the full screen image. Output these coordinates at the very end of your response in the exact format: [X, Y]. Do not use markdown.", x, y, text)
     } else {
-        format!("You are in Guide Mode. The user just clicked their mouse at X: {}, Y: {}. Look at the new 600x600 screenshot. Did they perform the previous step correctly? If yes, give the NEXT step and end with [GUIDE_MODE_ON]. If no, correct them and end with [GUIDE_MODE_ON]. If the task is finished, congratulate them and end with [GUIDE_MODE_OFF]. Keep it under 150 chars. IMPORTANT: If you want the user to click something, you MUST output the exact pixel coordinates of the target element based on the 600x600 image provided. Output these coordinates at the very end of your response in the exact format: [X, Y]. Do not use markdown.", x, y)
+        format!("You are in Guide Mode. The user just clicked their mouse at X: {}, Y: {}. Look at the new full screen screenshot. Did they perform the previous step correctly? If yes, give the NEXT step and end with [GUIDE_MODE_ON]. If no, correct them and end with [GUIDE_MODE_ON]. If the task is finished, congratulate them and end with [GUIDE_MODE_OFF]. Keep it under 150 chars. IMPORTANT: If you want the user to click something, you MUST output the exact ABSOLUTE pixel coordinates of the target element based on the full screen image. Output these coordinates at the very end of your response in the exact format: [X, Y]. Do not use markdown.", x, y)
     };
     
     let api_key = match std::env::var("GEMINI_API_KEY") {
@@ -62,7 +58,6 @@ async fn run_ai_pipeline(app: AppHandle, user_text: Option<String>, x: i32, y: i
     }
     
     if response_text.is_empty() {
-        // API failed (e.g. rate limit). Turn off guide mode so we don't spam requests on every click!
         *is_guiding.lock().unwrap() = false;
         if let Some(w) = app.get_webview_window("main") { 
             let _ = w.eval("document.getElementById('ai-companion').className = 'orb';"); 
@@ -81,7 +76,6 @@ async fn run_ai_pipeline(app: AppHandle, user_text: Option<String>, x: i32, y: i
             if parts.len() == 2 {
                 if let (Ok(hx), Ok(hy)) = (parts[0].trim().parse::<i32>(), parts[1].trim().parse::<i32>()) {
                     highlight_coords = Some((hx, hy));
-                    // Remove coordinates from speech!
                     response_text = response_text[..start].trim().to_string();
                 }
             }
@@ -93,10 +87,8 @@ async fn run_ai_pipeline(app: AppHandle, user_text: Option<String>, x: i32, y: i
     println!("HIGHLIGHT COORDS: {:?}", highlight_coords);
     println!("============================");
     
-    if let Some((hx, hy)) = highlight_coords {
-        // Absolute Screen Position (Top left of image + Relative coords)
-        let abs_x = x - 300 + hx;
-        let abs_y = y - 300 + hy;
+    if let Some((abs_x, abs_y)) = highlight_coords {
+        // Absolute Screen Position (Image is now full screen, so coords are already absolute!)
         if let Some(w) = app.get_webview_window("highlight") {
             let _ = w.set_position(tauri::Position::Physical(tauri::PhysicalPosition::new(abs_x - 30, abs_y - 30)));
             let _ = w.show();
@@ -118,7 +110,6 @@ async fn run_ai_pipeline(app: AppHandle, user_text: Option<String>, x: i32, y: i
     
     *is_guiding.lock().unwrap() = turn_guide_on;
     
-    // Update frontend color based on guide state
     if turn_guide_on {
         let js = "document.getElementById('ai-companion').className = 'orb guiding';";
         if let Some(w) = app.get_webview_window("main") { let _ = w.eval(js); }
@@ -166,7 +157,7 @@ pub fn run() {
                             
                             let kdialog_output = Command::new("kdialog")
                                 .arg("--inputbox")
-                                .arg("Ask ClickyAI a question about the area under your mouse:")
+                                .arg("Ask ClickyAI a question about your screen:")
                                 .output();
                                 
                             let mut user_text = String::new();
@@ -189,7 +180,7 @@ pub fn run() {
                             let busy_clone = is_busy_shortcut.clone();
                             
                             tauri::async_runtime::spawn(async move {
-                                println!("Starting Guide Mode AI Pipeline...");
+                                println!("Starting AI Pipeline (Full Screen Mode)...");
                                 run_ai_pipeline(app_clone, Some(user_text), cursor_x, cursor_y, guide_clone, busy_clone).await;
                             });
                         }
@@ -201,9 +192,7 @@ pub fn run() {
             let hotkey = "alt+x".parse::<Shortcut>().unwrap();
             let _ = app.global_shortcut().register(hotkey);
 
-            // Make all overlay windows ignore cursor events so they don't block mouse clicks!
             if let Some(w) = app.get_webview_window("main") { let _ = w.set_ignore_cursor_events(true); }
-            if let Some(w) = app.get_webview_window("viewfinder") { let _ = w.set_ignore_cursor_events(true); }
             if let Some(w) = app.get_webview_window("highlight") { let _ = w.set_ignore_cursor_events(true); }
             
             let is_busy_thread = is_busy.clone();
@@ -218,12 +207,8 @@ pub fn run() {
                     let mouse: MouseState = device_state.get_mouse();
                     let (x, y) = mouse.coords;
                     
-                    // Constantly update BOTH the main orb and the viewfinder bounding box positions
                     if let Some(w) = app_handle_thread.get_webview_window("main") {
                         let _ = w.set_position(tauri::Position::Physical(tauri::PhysicalPosition::new(x - 5, y - 5)));
-                    }
-                    if let Some(w) = app_handle_thread.get_webview_window("viewfinder") {
-                        let _ = w.set_position(tauri::Position::Physical(tauri::PhysicalPosition::new(x - 300, y - 300)));
                     }
                     
                     let left_pressed = mouse.button_pressed.get(1).copied().unwrap_or(false);
@@ -239,7 +224,6 @@ pub fn run() {
                         if guiding && !*busy {
                             *busy = true;
                             
-                            // Hide the highlight window BEFORE taking a screenshot so the AI doesn't see its own UI!
                             if let Some(w) = app_handle_thread.get_webview_window("highlight") { let _ = w.hide(); }
                             if let Some(w) = app_handle_thread.get_webview_window("main") {
                                 let _ = w.eval("document.getElementById('ai-companion').className = 'orb listening';");

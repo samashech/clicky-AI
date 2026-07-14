@@ -22,18 +22,6 @@
         "visible": true
       },
       {
-        "label": "viewfinder",
-        "url": "viewfinder.html",
-        "title": "viewfinder",
-        "width": 600,
-        "height": 600,
-        "transparent": true,
-        "decorations": false,
-        "alwaysOnTop": true,
-        "skipTaskbar": true,
-        "visible": true
-      },
-      {
         "label": "highlight",
         "url": "highlight.html",
         "title": "highlight",
