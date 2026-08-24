@@ -78,4 +78,4 @@ function drawBezierCurve(mouseX, mouseY, target) {
 }
 
 // For testing: Trigger the mock AI response processing
-setTimeout(() => invoke('process_ai_step'), 1000);
+setTimeout(() => invoke('process_ai_step', { userPrompt: "How do I crop this?", targetHint: "Crop Tool" }), 1000);

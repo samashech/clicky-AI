@@ -1,16 +1,28 @@
 use tauri::{Manager, Emitter, AppHandle};
+use reqwest::Client;
 use serde::{Deserialize, Serialize};
+use base64::{Engine as _, engine::general_purpose};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use rdev::{listen, Event, EventType};
 
-// --- Pillar 5: API Response Schema ---
-#[derive(Deserialize, Serialize, Debug, Clone)]
-struct VlmResponse {
-    status: String,
-    instruction: String,
-    target_element_name: String,
-    vlm_fallback_coords: Coords,
+#[derive(Serialize)]
+struct ParseRequest {
+    image_base64: String,
+}
+
+#[derive(Deserialize, Debug, Clone)]
+struct ParsedElement {
+    id: i32,
+    #[serde(rename = "type")]
+    element_type: String,
+    text: String,
+    box_coords: [f64; 4], // [x, y, width, height]
+}
+
+#[derive(Deserialize, Debug)]
+struct ParseResponse {
+    elements: Vec<ParsedElement>,
 }
 
 #[derive(Deserialize, Serialize, Debug, Clone)]
@@ -24,29 +36,43 @@ lazy_static::lazy_static! {
     static ref ACTIVE_TARGET_RECT: Arc<Mutex<Option<(f64, f64, f64, f64)>>> = Arc::new(Mutex::new(None));
 }
 
-// --- Pillar 2: UIA First Grounding ---
 #[cfg(target_os = "windows")]
 fn get_uia_bounding_box(target_name: &str) -> Option<(f64, f64, f64, f64)> {
-    use windows::Win32::System::Com::{CoInitialize, CoUninitialize};
-    use windows::Win32::UI::Accessibility::{CUIAutomation, IUIAutomation, UIA_NamePropertyId};
+    use windows::Win32::System::Com::{CoInitializeEx, CoUninitialize, COINIT_MULTITHREADED};
+    use windows::Win32::UI::Accessibility::{CUIAutomation, IUIAutomation, UIA_NamePropertyId, TreeScope_Subtree};
     use windows::core::BSTR;
 
     unsafe {
-        let _ = CoInitialize(None);
-        // Initialize COM and create IUIAutomation instance
-        let uia: Result<IUIAutomation, _> = windows::core::CoCreateInstance(&CUIAutomation, None, windows::Win32::System::Com::CLSCTX_INPROC_SERVER);
+        // Initialize COM for the background thread
+        let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+        
+        let uia: Result<IUIAutomation, _> = windows::core::CoCreateInstance(
+            &CUIAutomation, 
+            None, 
+            windows::Win32::System::Com::CLSCTX_INPROC_SERVER
+        );
         
         if let Ok(automation) = uia {
+            // Get the element directly under the mouse, or the active foreground window
+            // For a robust search, we start at the root desktop element
             if let Ok(root) = automation.GetRootElement() {
+                
+                // Create a condition: Name == target_name
                 let name_bstr = BSTR::from(target_name);
                 let variant = windows::Win32::System::Variant::VARIANT::from(name_bstr);
                 
                 if let Ok(condition) = automation.CreatePropertyCondition(UIA_NamePropertyId, &variant) {
-                    // Search for the element
-                    if let Ok(element) = root.FindFirst(windows::Win32::UI::Accessibility::TreeScope_Subtree, &condition) {
+                    
+                    // Walk the tree (Subtree scope searches all children recursively)
+                    if let Ok(element) = root.FindFirst(TreeScope_Subtree, &condition) {
                         if let Ok(rect) = element.CurrentBoundingRectangle() {
                             let _ = CoUninitialize();
-                            return Some((rect.left as f64, rect.top as f64, (rect.right - rect.left) as f64, (rect.bottom - rect.top) as f64));
+                            return Some((
+                                rect.left as f64, 
+                                rect.top as f64, 
+                                (rect.right - rect.left) as f64, 
+                                (rect.bottom - rect.top) as f64
+                            ));
                         }
                     }
                 }
@@ -94,7 +120,7 @@ pub fn run() {
                         }
                         EventType::ButtonPress(rdev::Button::Left) => {
                             let rect_lock = ACTIVE_TARGET_RECT.lock().unwrap();
-                            if let Some((rx, ry, rw, rh)) = *rect_lock {
+                            if let Some((_rx, _ry, _rw, _rh)) = *rect_lock {
                                 // We don't have mouse coords in ButtonPress event directly, 
                                 // but we can track them via MouseMove state. For brevity, assuming a hit-test here:
                                 // let (mx, my) = get_last_mouse_coords();
@@ -119,32 +145,93 @@ pub fn run() {
 }
 
 #[tauri::command]
-async fn process_ai_step(app: AppHandle) -> Result<(), String> {
-    // 1. Send screenshot & prompt to Gemini here...
-    // 2. Parse response (Mocked below)
-    let mock_json = r#"{
-        "status": "in_progress",
-        "instruction": "Click the Crop tool on the left toolbar",
-        "target_element_name": "Crop",
-        "vlm_fallback_coords": {"x": 0.12, "y": 0.45}
-    }"#;
+async fn process_ai_step(app: AppHandle, user_prompt: String, target_hint: String) -> Result<(), String> {
     
-    let res: VlmResponse = serde_json::from_str(mock_json).unwrap();
-    
-    // 3. Attempt UIA Fast-path Grounding
-    let bounding_box = match get_uia_bounding_box(&res.target_element_name) {
-        Some(rect) => rect,
-        None => {
-            // Fallback to VLM coordinates (Assuming 1920x1080 screen for example)
-            let x = (res.vlm_fallback_coords.x * 1920.0) as f64;
-            let y = (res.vlm_fallback_coords.y * 1080.0) as f64;
-            (x - 20.0, y - 20.0, 40.0, 40.0) // Create a 40x40 box around point
+    // ==========================================
+    // STEP 1: Attempt Windows UIA Fast-Path
+    // ==========================================
+    if let Some(rect) = get_uia_bounding_box(&target_hint) {
+        println!("Found via UIA! Skipping vision models.");
+        *ACTIVE_TARGET_RECT.lock().unwrap() = Some(rect);
+        let _ = app.emit("draw-spotlight", rect);
+        return Ok(());
+    }
+
+    println!("UIA failed. Falling back to local OmniParser & Ollama...");
+
+    // ==========================================
+    // STEP 2: Capture Screen & Send to Local Parser
+    // ==========================================
+    let mut base64_image = String::new();
+    if let Ok(screens) = screenshots::Screen::all() {
+        if let Some(screen) = screens.first() {
+            if let Ok(image) = screen.capture() {
+                // For simplicity, buffer through the filesystem as in the previous pipeline
+                let _ = image.save("/tmp/clickyai_vision.png");
+                if let Ok(bytes) = std::fs::read("/tmp/clickyai_vision.png") {
+                    base64_image = general_purpose::STANDARD.encode(&bytes);
+                }
+            }
         }
-    };
+    }
 
-    // 4. Update state and notify frontend to draw spotlight
-    *ACTIVE_TARGET_RECT.lock().unwrap() = Some(bounding_box);
-    app.emit("draw-spotlight", bounding_box).unwrap();
+    let client = Client::new();
+    let parse_res = client.post("http://127.0.0.1:8000/parse")
+        .json(&ParseRequest { image_base64: base64_image })
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
 
-    Ok(())
+    let parsed_data: ParseResponse = parse_res.json().await.map_err(|e| e.to_string())?;
+
+    // ==========================================
+    // STEP 3: Ask Local Ollama to pick the ID
+    // ==========================================
+    // Convert the parsed elements into a readable string for the LLM
+    let mut elements_text = String::from("On screen elements:\n");
+    for el in &parsed_data.elements {
+        elements_text.push_str(&format!("ID: {}, Type: {}, Text: '{}'\n", el.id, el.element_type, el.text));
+    }
+
+    let llm_prompt = format!(
+        "You are a UI routing assistant. The user wants to: '{}'. \n\
+         Based on the following UI elements, return ONLY the integer ID of the element they should click. Do not output any other text.\n{}", 
+        user_prompt, elements_text
+    );
+
+    let ollama_payload = serde_json::json!({
+        "model": "llama3.2",
+        "prompt": llm_prompt,
+        "stream": false
+    });
+
+    let ollama_res = client.post("http://127.0.0.1:11434/api/generate")
+        .json(&ollama_payload)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let ollama_json: serde_json::Value = ollama_res.json().await.map_err(|e| e.to_string())?;
+    
+    // Parse the returned ID
+    if let Some(response_text) = ollama_json["response"].as_str() {
+        let selected_id: i32 = response_text.trim().parse().unwrap_or(-1);
+        
+        // Find the bounding box matching the ID
+        if let Some(element) = parsed_data.elements.iter().find(|e| e.id == selected_id) {
+            let rect = (
+                element.box_coords[0],
+                element.box_coords[1],
+                element.box_coords[2],
+                element.box_coords[3],
+            );
+            
+            // Trigger frontend spotlight
+            *ACTIVE_TARGET_RECT.lock().unwrap() = Some(rect);
+            let _ = app.emit("draw-spotlight", rect);
+            return Ok(());
+        }
+    }
+
+    Err("AI could not determine the correct element.".to_string())
 }
