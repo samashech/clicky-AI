@@ -46,7 +46,7 @@ fn get_uia_bounding_box(target_name: &str) -> Option<(f64, f64, f64, f64)> {
         // Initialize COM for the background thread
         let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
         
-        let uia: Result<IUIAutomation, _> = windows::core::CoCreateInstance(
+        let uia: Result<IUIAutomation, _> = windows::Win32::System::Com::CoCreateInstance(
             &CUIAutomation, 
             None, 
             windows::Win32::System::Com::CLSCTX_INPROC_SERVER
@@ -92,8 +92,22 @@ fn get_uia_bounding_box(_: &str) -> Option<(f64, f64, f64, f64)> {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_shell::init())
         .setup(|app| {
             let window = app.get_webview_window("main").unwrap();
+
+            // Spawn the Python Sidecar Server
+            use tauri_plugin_shell::ShellExt;
+            match app.shell().sidecar("omni_server") {
+                Ok(command) => {
+                    if let Err(e) = command.spawn() {
+                        println!("Failed to spawn sidecar: {}", e);
+                    } else {
+                        println!("OmniServer sidecar spawned successfully!");
+                    }
+                }
+                Err(e) => println!("Could not find sidecar: {}", e),
+            }
 
             // --- Pillar 1: Win32 Spotlight Layer Configuration ---
             #[cfg(target_os = "windows")]
@@ -101,7 +115,7 @@ pub fn run() {
                 use windows::Win32::UI::WindowsAndMessaging::{GetWindowLongW, SetWindowLongW, GWL_EXSTYLE, WS_EX_LAYERED, WS_EX_TRANSPARENT, WS_EX_TOPMOST};
                 use windows::Win32::Foundation::HWND;
                 
-                let hwnd = HWND(window.hwnd().unwrap().0 as *mut _);
+                let hwnd = HWND(window.hwnd().unwrap().0 as isize);
                 unsafe {
                     let ex_style = GetWindowLongW(hwnd, GWL_EXSTYLE);
                     // Force the window to be a topmost, click-through overlay

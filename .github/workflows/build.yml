@@ -25,6 +25,19 @@ jobs:
       - name: Install frontend dependencies
         run: npm install
 
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Build Python Sidecar
+        run: |
+          pip install pyinstaller fastapi uvicorn pydantic
+          pyinstaller --onefile omni_server/main.py
+          mkdir src-tauri/binaries
+          # Tauri sidecar naming convention requires the target triple on Windows:
+          copy dist\main.exe src-tauri\binaries\omni_server-x86_64-pc-windows-msvc.exe
+
       - name: Build Tauri App
         uses: tauri-apps/tauri-action@v0
         env:
