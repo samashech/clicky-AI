@@ -1,16 +1,32 @@
-<!doctype html>
+<!DOCTYPE html>
 <html lang="en">
-  <head>
-    <meta charset="UTF-8" />
-    <link rel="stylesheet" href="styles.css" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>ClickyAI Companion</title>
-  </head>
-  <body>
-    <!-- This is our new glowing AI companion! -->
-    <div id="ai-companion" class="orb">
-      <div class="inner-glow"></div>
-    </div>
+<head>
+    <meta charset="UTF-8">
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <!-- The Dark Screen Overlay with a Mask -->
+    <svg id="overlay-svg" width="100vw" height="100vh">
+        <defs>
+            <mask id="spotlight-mask">
+                <!-- White means visible (dark overlay), Black means transparent (the hole) -->
+                <rect width="100%" height="100%" fill="white" />
+                <rect id="spotlight-hole" x="0" y="0" width="0" height="0" rx="8" fill="black" />
+            </mask>
+        </defs>
+        
+        <!-- The darkened screen layer -->
+        <rect width="100%" height="100%" fill="rgba(0,0,0,0.6)" mask="url(#spotlight-mask)" />
+
+        <!-- Pillar 3: Magnetic Bezier Curve -->
+        <path id="guide-line" fill="none" stroke="#00FFDD" stroke-width="3" stroke-dasharray="8 8" />
+        
+        <!-- Glowing Border around the target -->
+        <rect id="spotlight-border" x="0" y="0" width="0" height="0" rx="8" fill="none" stroke="#00FFDD" stroke-width="3" />
+    </svg>
+
+    <div id="tooltip" class="hidden">Instruction appears here</div>
+
     <script type="module" src="main.js"></script>
-  </body>
+</body>
 </html>

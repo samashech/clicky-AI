@@ -1,82 +1,49 @@
-:root {
-  background-color: transparent;
-  margin: 0;
-  padding: 0;
-  overflow: hidden; /* Hide scrollbars that might pop up */
+body, html {
+    margin: 0;
+    padding: 0;
+    width: 100vw;
+    height: 100vh;
+    overflow: hidden;
+    background: transparent;
+    pointer-events: none; /* Let clicks pass through */
 }
 
-body {
-  margin: 0;
-  padding: 0;
-  background-color: transparent;
-  display: flex;
-  justify-content: center;
-  align-items: center;
-  height: 100vh;
-  width: 100vw;
-  overflow: hidden;
+#overlay-svg {
+    position: absolute;
+    top: 0;
+    left: 0;
+    z-width: 100%;
+    height: 100%;
 }
 
-/* Premium Glassmorphism & Glowing Orb Aesthetics */
-.orb {
-  position: relative;
-  width: 40px;
-  height: 40px;
-  background: radial-gradient(circle at 30% 30%, #4facfe, #00f2fe);
-  border-radius: 50%;
-  box-shadow: 0 0 20px #00f2fe, inset 0 0 10px #ffffff;
-  animation: pulse 2.5s infinite ease-in-out;
-  transition: transform 0.3s ease, filter 0.3s ease;
-  cursor: pointer;
+/* Pillar 3: Spring Physics & Pulsing Animation */
+#spotlight-border {
+    transition: all 0.5s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+    animation: pulse 2s infinite ease-in-out;
 }
 
-/* Micro-animation when the user hovers over the AI */
-.orb:hover {
-  transform: scale(1.1);
-  box-shadow: 0 0 30px #00f2fe, inset 0 0 15px #ffffff;
-  filter: brightness(1.2);
+#spotlight-hole {
+    transition: all 0.5s cubic-bezier(0.175, 0.885, 0.32, 1.275);
 }
 
-/* A soft white highlight to make it look 3D and spherical */
-.inner-glow {
-  position: absolute;
-  top: 6px;
-  left: 6px;
-  width: 12px;
-  height: 12px;
-  background: white;
-  border-radius: 50%;
-  opacity: 0.8;
-  filter: blur(2px);
-}
-
-/* Breathing animation so it feels alive */
 @keyframes pulse {
-  0% { transform: scale(1); box-shadow: 0 0 15px #00f2fe; }
-  50% { transform: scale(1.05); box-shadow: 0 0 25px #4facfe; }
+    0% { stroke-opacity: 1; stroke-width: 3px; }
+    50% { stroke-opacity: 0.5; stroke-width: 6px; }
+    100% { stroke-opacity: 1; stroke-width: 3px; }
 }
 
-/* When the AI is activated via hotkey, it changes to an active listening state */
-.orb.listening {
-  background: radial-gradient(circle at 30% 30%, #ff4b2b, #ff416c);
-  box-shadow: 0 0 40px #ff416c, inset 0 0 20px #ffffff;
-  animation: pulse-active 1s infinite ease-in-out;
+#tooltip {
+    position: absolute;
+    background: #111;
+    color: white;
+    padding: 12px 20px;
+    border-radius: 8px;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    border: 1px solid #333;
+    box-shadow: 0 10px 25px rgba(0,0,0,0.5);
+    transition: all 0.4s cubic-bezier(0.175, 0.885, 0.32, 1.275);
 }
-
-@keyframes pulse-active {
-  0% { transform: scale(1); box-shadow: 0 0 30px #ff416c; }
-  50% { transform: scale(1.15); box-shadow: 0 0 50px #ff4b2b; }
-  100% { transform: scale(1); box-shadow: 0 0 30px #ff416c; }
-}
-
-/* When the AI is waiting for a user click in guide mode */
-.orb.guiding {
-  background: radial-gradient(circle at 30% 30%, #f6d365, #fda085);
-  box-shadow: 0 0 30px #fda085, inset 0 0 15px #ffffff;
-  animation: pulse-guide 1.5s infinite ease-in-out;
-}
-@keyframes pulse-guide {
-  0% { transform: scale(1); box-shadow: 0 0 20px #fda085; }
-  50% { transform: scale(1.1); box-shadow: 0 0 40px #f6d365; }
-  100% { transform: scale(1); box-shadow: 0 0 20px #fda085; }
+.hidden {
+    opacity: 0;
+    transform: translateY(10px);
 }

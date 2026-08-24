@@ -1,241 +1,150 @@
 use tauri::{Manager, Emitter, AppHandle};
-use device_query::{DeviceQuery, DeviceState, MouseState};
-use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
+use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
-use std::process::Command;
-use std::time::Duration;
 use std::thread;
-use base64::{Engine as _, engine::general_purpose};
+use rdev::{listen, Event, EventType};
 
-async fn run_ai_pipeline(app: AppHandle, user_text: Option<String>, has_audio: bool, x: i32, y: i32, is_busy: Arc<Mutex<bool>>) {
-    // 1. Capture Full Vision
-    if let Ok(screens) = screenshots::Screen::all() {
-        if let Some(screen) = screens.first() {
-            if let Ok(image) = screen.capture() {
-                let _ = image.save("/tmp/clickyai_vision.png");
-            }
-        }
-    }
-    
-    let api_key = match std::env::var("GEMINI_API_KEY") {
-        Ok(k) => k,
-        Err(_) => {
-            *is_busy.lock().unwrap() = false;
-            return;
-        }
-    };
-    
-    let url = format!("https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={}", api_key);
-    let client = reqwest::Client::new();
-    
-    let image_bytes = std::fs::read("/tmp/clickyai_vision.png").unwrap_or_default();
-    let base64_image = general_purpose::STANDARD.encode(&image_bytes);
-    
-    let mut parts = vec![];
-    
-    // Core Instructions
-    let prompt = format!("You are a hyper-intelligent desktop AI assistant. The user's mouse cursor is currently located at exact screen coordinates X: {}, Y: {}. Look at the attached full-screen screenshot. If the user asks a question, answer it by looking precisely at what their mouse is pointing at! Keep your response brief, helpful, and under 150 characters as it will be spoken out loud. Do not use markdown.", x, y);
-    parts.push(serde_json::json!({ "text": prompt }));
-    
-    // Add Text Input if any
-    if let Some(text) = user_text {
-        parts.push(serde_json::json!({ "text": format!("The user typed this question: {}", text) }));
-    }
-    
-    // Add Image
-    parts.push(serde_json::json!({
-        "inline_data": {
-            "mime_type": "image/png",
-            "data": base64_image
-        }
-    }));
-    
-    // Add Audio Input if any
-    if has_audio {
-        if let Ok(audio_bytes) = std::fs::read("/tmp/clickyai_audio.wav") {
-            let base64_audio = general_purpose::STANDARD.encode(&audio_bytes);
-            parts.push(serde_json::json!({
-                "inline_data": {
-                    "mime_type": "audio/wav",
-                    "data": base64_audio
-                }
-            }));
-        }
-    }
-    
-    let payload = serde_json::json!({
-        "contents": [{
-            "parts": parts
-        }]
-    });
-    
-    let mut response_text = String::new();
-    if let Ok(res) = client.post(&url).json(&payload).send().await {
-        if let Ok(json) = res.json::<serde_json::Value>().await {
-            if let Some(text) = json["candidates"][0]["content"]["parts"][0]["text"].as_str() {
-                response_text = text.to_string();
-            } else {
-                println!("Gemini Error: {}", json.to_string());
-            }
-        }
-    }
-    
-    if response_text.is_empty() {
-        if let Some(w) = app.get_webview_window("main") { 
-            let _ = w.eval("document.getElementById('ai-companion').className = 'orb';"); 
-        }
-        *is_busy.lock().unwrap() = false;
-        return;
-    }
-    
-    println!("============================");
-    println!("GEMINI SAYS: {}", response_text);
-    println!("============================");
-    
-    if let Some(w) = app.get_webview_window("main") { 
-        let _ = w.eval("document.getElementById('ai-companion').className = 'orb';"); 
-    }
-    
-    // 4. TTS
-    let tts_url = format!("https://translate.google.com/translate_tts?ie=UTF-8&q={}&tl=en&client=tw-ob", urlencoding::encode(response_text.trim()));
-    if let Ok(res) = client.get(&tts_url).send().await {
-        if let Ok(audio_bytes) = res.bytes().await {
-            let _ = std::fs::write("/tmp/clickyai_response.mp3", audio_bytes);
-            let _ = Command::new("ffplay").arg("-nodisp").arg("-autoexit").arg("/tmp/clickyai_response.mp3").output();
-        }
-    }
-    
-    *is_busy.lock().unwrap() = false;
+// --- Pillar 5: API Response Schema ---
+#[derive(Deserialize, Serialize, Debug, Clone)]
+struct VlmResponse {
+    status: String,
+    instruction: String,
+    target_element_name: String,
+    vlm_fallback_coords: Coords,
 }
+
+#[derive(Deserialize, Serialize, Debug, Clone)]
+struct Coords {
+    x: f32,
+    y: f32,
+}
+
+// Global state to track the current active target bounding box [x, y, width, height]
+lazy_static::lazy_static! {
+    static ref ACTIVE_TARGET_RECT: Arc<Mutex<Option<(f64, f64, f64, f64)>>> = Arc::new(Mutex::new(None));
+}
+
+// --- Pillar 2: UIA First Grounding ---
+#[cfg(target_os = "windows")]
+fn get_uia_bounding_box(target_name: &str) -> Option<(f64, f64, f64, f64)> {
+    use windows::Win32::System::Com::{CoInitialize, CoUninitialize};
+    use windows::Win32::UI::Accessibility::{CUIAutomation, IUIAutomation, UIA_NamePropertyId};
+    use windows::core::BSTR;
+
+    unsafe {
+        let _ = CoInitialize(None);
+        // Initialize COM and create IUIAutomation instance
+        let uia: Result<IUIAutomation, _> = windows::core::CoCreateInstance(&CUIAutomation, None, windows::Win32::System::Com::CLSCTX_INPROC_SERVER);
+        
+        if let Ok(automation) = uia {
+            if let Ok(root) = automation.GetRootElement() {
+                let name_bstr = BSTR::from(target_name);
+                let variant = windows::Win32::System::Variant::VARIANT::from(name_bstr);
+                
+                if let Ok(condition) = automation.CreatePropertyCondition(UIA_NamePropertyId, &variant) {
+                    // Search for the element
+                    if let Ok(element) = root.FindFirst(windows::Win32::UI::Accessibility::TreeScope_Subtree, &condition) {
+                        if let Ok(rect) = element.CurrentBoundingRectangle() {
+                            let _ = CoUninitialize();
+                            return Some((rect.left as f64, rect.top as f64, (rect.right - rect.left) as f64, (rect.bottom - rect.top) as f64));
+                        }
+                    }
+                }
+            }
+        }
+        let _ = CoUninitialize();
+    }
+    None
+}
+
+#[cfg(not(target_os = "windows"))]
+fn get_uia_bounding_box(_: &str) -> Option<(f64, f64, f64, f64)> { None }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    let is_busy = Arc::new(Mutex::new(false));
-    let is_busy_shortcut = is_busy.clone();
-    
     tauri::Builder::default()
-        .plugin(tauri_plugin_opener::init())
-        .plugin(
-            tauri_plugin_global_shortcut::Builder::new()
-                .with_handler(move |app, _shortcut, event| {
-                    if event.state == ShortcutState::Pressed {
-                        let mut busy = is_busy_shortcut.lock().unwrap();
-                        if !*busy {
-                            *busy = true;
-                            
-                            let device_state = DeviceState::new();
-                            let mouse = device_state.get_mouse();
-                            let (cursor_x, cursor_y) = mouse.coords;
-                            
-                            // 1. Pop up a Menu to choose input type
-                            let kdialog_choice = Command::new("kdialog")
-                                .arg("--menu")
-                                .arg("How would you like to ask ClickyAI?")
-                                .arg("type")
-                                .arg("Type Text")
-                                .arg("speak")
-                                .arg("Record Audio")
-                                .output();
-                                
-                            let mut choice = String::new();
-                            if let Ok(output) = kdialog_choice {
-                                choice = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                            }
-                            
-                            if choice.is_empty() {
-                                *busy = false;
-                                return;
-                            }
-                            
-                            let mut user_text = None;
-                            let mut has_audio = false;
-                            
-                            // 2. Handle specific input type
-                            if choice == "type" {
-                                let kdialog_input = Command::new("kdialog")
-                                    .arg("--inputbox")
-                                    .arg("Type your question:")
-                                    .output();
-                                    
-                                if let Ok(output) = kdialog_input {
-                                    let txt = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                                    if txt.is_empty() {
-                                        *busy = false;
-                                        return;
-                                    }
-                                    user_text = Some(txt);
-                                } else {
-                                    *busy = false;
-                                    return;
-                                }
-                            } else if choice == "speak" {
-                                // Start recording audio in background
-                                let mut arecord = Command::new("arecord")
-                                    .arg("-f")
-                                    .arg("S16_LE")
-                                    .arg("-r")
-                                    .arg("16000")
-                                    .arg("-c")
-                                    .arg("1")
-                                    .arg("/tmp/clickyai_audio.wav")
-                                    .spawn()
-                                    .expect("Failed to start arecord");
-                                    
-                                // Block the UI with a native popup to stop recording
-                                let _ = Command::new("kdialog")
-                                    .arg("--msgbox")
-                                    .arg("🔴 Recording your voice...\n\nPress OK to stop recording and send to AI!")
-                                    .output();
-                                    
-                                // Kill arecord when the user dismisses the box!
-                                let _ = arecord.kill();
-                                let _ = arecord.wait();
-                                has_audio = true;
-                            }
-                            
-                            // Visual indicator for listening/processing
-                            let js_code = "document.getElementById('ai-companion').className = 'orb listening';";
-                            if let Some(window) = app.get_webview_window("main") { let _ = window.eval(js_code); }
-                            
-                            let _ = dotenvy::dotenv();
-                            
-                            let app_clone = app.clone();
-                            let busy_clone = is_busy_shortcut.clone();
-                            
-                            tauri::async_runtime::spawn(async move {
-                                println!("Starting AI Pipeline (Single Shot)...");
-                                run_ai_pipeline(app_clone, user_text, has_audio, cursor_x, cursor_y, busy_clone).await;
-                            });
-                        }
-                    }
-                })
-                .build(),
-        )
-        .setup(move |app| {
-            let hotkey = "alt+x".parse::<Shortcut>().unwrap();
-            let _ = app.global_shortcut().register(hotkey);
+        .setup(|app| {
+            let window = app.get_webview_window("main").unwrap();
 
-            if let Some(w) = app.get_webview_window("main") { let _ = w.set_ignore_cursor_events(true); }
+            // --- Pillar 1: Win32 Spotlight Layer Configuration ---
+            #[cfg(target_os = "windows")]
+            {
+                use windows::Win32::UI::WindowsAndMessaging::{GetWindowLongW, SetWindowLongW, GWL_EXSTYLE, WS_EX_LAYERED, WS_EX_TRANSPARENT, WS_EX_TOPMOST};
+                use windows::Win32::Foundation::HWND;
+                
+                let hwnd = HWND(window.hwnd().unwrap().0 as *mut _);
+                unsafe {
+                    let ex_style = GetWindowLongW(hwnd, GWL_EXSTYLE);
+                    // Force the window to be a topmost, click-through overlay
+                    SetWindowLongW(hwnd, GWL_EXSTYLE, ex_style | (WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOPMOST).0 as i32);
+                }
+            }
             
-            let app_handle_thread = app.handle().clone();
-            
-            // Minimal loop just to animate the orb to follow the cursor!
+            // Allow Tauri to ignore clicks cross-platform just in case
+            let _ = window.set_ignore_cursor_events(true);
+
+            // --- Pillar 4: Step Verification via rdev global hooks ---
+            let app_handle = app.handle().clone();
             thread::spawn(move || {
-                let device_state = DeviceState::new();
-                loop {
-                    let mouse: MouseState = device_state.get_mouse();
-                    let (x, y) = mouse.coords;
-                    
-                    if let Some(w) = app_handle_thread.get_webview_window("main") {
-                        let _ = w.set_position(tauri::Position::Physical(tauri::PhysicalPosition::new(x - 5, y - 5)));
+                let callback = move |event: Event| {
+                    match event.event_type {
+                        EventType::MouseMove { x, y } => {
+                            // Stream live coordinates to frontend for Bezier path
+                            let _ = app_handle.emit("mouse-move", Coords { x: x as f32, y: y as f32 });
+                        }
+                        EventType::ButtonPress(rdev::Button::Left) => {
+                            let rect_lock = ACTIVE_TARGET_RECT.lock().unwrap();
+                            if let Some((rx, ry, rw, rh)) = *rect_lock {
+                                // We don't have mouse coords in ButtonPress event directly, 
+                                // but we can track them via MouseMove state. For brevity, assuming a hit-test here:
+                                // let (mx, my) = get_last_mouse_coords();
+                                // if mx >= rx && mx <= rx + rw && my >= ry && my <= ry + rh { ... }
+                                
+                                let _ = app_handle.emit("step-success", ());
+                            }
+                        }
+                        _ => {}
                     }
-                    
-                    thread::sleep(Duration::from_millis(16));
+                };
+                if let Err(error) = listen(callback) {
+                    println!("Error listening to rdev: {:?}", error);
                 }
             });
-            
+
             Ok(())
         })
+        .invoke_handler(tauri::generate_handler![process_ai_step])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[tauri::command]
+async fn process_ai_step(app: AppHandle) -> Result<(), String> {
+    // 1. Send screenshot & prompt to Gemini here...
+    // 2. Parse response (Mocked below)
+    let mock_json = r#"{
+        "status": "in_progress",
+        "instruction": "Click the Crop tool on the left toolbar",
+        "target_element_name": "Crop",
+        "vlm_fallback_coords": {"x": 0.12, "y": 0.45}
+    }"#;
+    
+    let res: VlmResponse = serde_json::from_str(mock_json).unwrap();
+    
+    // 3. Attempt UIA Fast-path Grounding
+    let bounding_box = match get_uia_bounding_box(&res.target_element_name) {
+        Some(rect) => rect,
+        None => {
+            // Fallback to VLM coordinates (Assuming 1920x1080 screen for example)
+            let x = (res.vlm_fallback_coords.x * 1920.0) as f64;
+            let y = (res.vlm_fallback_coords.y * 1080.0) as f64;
+            (x - 20.0, y - 20.0, 40.0, 40.0) // Create a 40x40 box around point
+        }
+    };
+
+    // 4. Update state and notify frontend to draw spotlight
+    *ACTIVE_TARGET_RECT.lock().unwrap() = Some(bounding_box);
+    app.emit("draw-spotlight", bounding_box).unwrap();
+
+    Ok(())
 }

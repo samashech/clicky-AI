@@ -1,61 +1,81 @@
-let mediaRecorder = null;
-let audioChunks = [];
+import { listen } from '@tauri-apps/api/event';
+import { invoke } from '@tauri-apps/api/core';
 
-// Request microphone access on startup
-window.addEventListener("DOMContentLoaded", async () => {
-  try {
-    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-    mediaRecorder = new MediaRecorder(stream, { mimeType: 'audio/webm' });
+let currentMouseX = 0;
+let currentMouseY = 0;
+let targetBox = null;
 
-    mediaRecorder.ondataavailable = (event) => {
-      if (event.data.size > 0) {
-        audioChunks.push(event.data);
-      }
-    };
+const guideLine = document.getElementById('guide-line');
+const hole = document.getElementById('spotlight-hole');
+const border = document.getElementById('spotlight-border');
+const tooltip = document.getElementById('tooltip');
 
-    mediaRecorder.onstop = async () => {
-      const audioBlob = new Blob(audioChunks, { type: 'audio/webm' });
-      audioChunks = []; // Reset for next recording
-      
-      // Convert Blob to Base64 to send to Rust
-      const reader = new FileReader();
-      reader.readAsDataURL(audioBlob);
-      reader.onloadend = async () => {
-        const base64Audio = reader.result.split(',')[1];
-        
-        // Grab the coordinates that were passed into stopRecording
-        const { x, y } = window.__cursorCoords;
-        
-        console.log("Sending audio to Rust...");
-        // Call our new Rust command
-        const { invoke } = window.__TAURI__.core;
-        await invoke('process_audio', { audioBase64: base64Audio, x: x, y: y });
-      };
-    };
-  } catch (err) {
-    console.error("Microphone access denied or not found:", err);
-  }
+// Track live global mouse coordinates
+listen('mouse-move', (event) => {
+    currentMouseX = event.payload.x;
+    currentMouseY = event.payload.y;
+    
+    // Continuously redraw the magnetic bezier curve if we have a target
+    if (targetBox) {
+        drawBezierCurve(currentMouseX, currentMouseY, targetBox);
+    }
 });
 
-// These functions will be executed directly from Rust via app.eval()
-window.startRecording = () => {
-  const orb = document.getElementById('ai-companion');
-  orb.classList.add('listening');
-  if (mediaRecorder && mediaRecorder.state === 'inactive') {
-    mediaRecorder.start();
-    console.log("Microphone recording started...");
-  }
-};
+// Activate the Spotlight
+listen('draw-spotlight', (event) => {
+    const [x, y, width, height] = event.payload;
+    targetBox = { x, y, width, height };
 
-window.stopRecording = (x, y) => {
-  const orb = document.getElementById('ai-companion');
-  orb.classList.remove('listening');
-  
-  // Store the coordinates globally so the onstop event can access them
-  window.__cursorCoords = { x, y };
+    // Move the SVG Mask and Border
+    const pad = 10;
+    hole.setAttribute('x', x - pad);
+    hole.setAttribute('y', y - pad);
+    hole.setAttribute('width', width + (pad*2));
+    hole.setAttribute('height', height + (pad*2));
 
-  if (mediaRecorder && mediaRecorder.state === 'recording') {
-    mediaRecorder.stop();
-    console.log("Microphone recording stopped.");
-  }
-};
+    border.setAttribute('x', x - pad);
+    border.setAttribute('y', y - pad);
+    border.setAttribute('width', width + (pad*2));
+    border.setAttribute('height', height + (pad*2));
+
+    // Position the tooltip below the target
+    tooltip.className = '';
+    tooltip.innerText = "Click the target to continue";
+    tooltip.style.left = `${x}px`;
+    tooltip.style.top = `${y + height + 20}px`;
+});
+
+// Step Verification Success
+listen('step-success', () => {
+    // Hide spotlight and clear path
+    targetBox = null;
+    guideLine.setAttribute('d', '');
+    hole.setAttribute('width', 0);
+    border.setAttribute('width', 0);
+    tooltip.className = 'hidden';
+    
+    // Play a native chime (HTML5 Audio or Tauri command)
+    console.log("Step verified! Proceeding...");
+});
+
+// Draw a smooth bezier curve from (x1, y1) to the center of the target bounding box
+function drawBezierCurve(mouseX, mouseY, target) {
+    const targetCenterX = target.x + (target.width / 2);
+    const targetCenterY = target.y + (target.height / 2);
+
+    // Calculate control points to give it a nice "S" curve swoop
+    const diffX = targetCenterX - mouseX;
+    const diffY = targetCenterY - mouseY;
+    
+    const cp1x = mouseX + (diffX * 0.5);
+    const cp1y = mouseY;
+    const cp2x = targetCenterX - (diffX * 0.5);
+    const cp2y = targetCenterY;
+
+    // SVG Path data: Move to mouse, Cubic Bezier to target center
+    const path = `M ${mouseX} ${mouseY} C ${cp1x} ${cp1y}, ${cp2x} ${cp2y}, ${targetCenterX} ${targetCenterY}`;
+    guideLine.setAttribute('d', path);
+}
+
+// For testing: Trigger the mock AI response processing
+setTimeout(() => invoke('process_ai_step'), 1000);

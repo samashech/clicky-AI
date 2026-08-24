@@ -12,9 +12,8 @@
       {
         "label": "main",
         "url": "index.html",
-        "title": "tauri-app",
-        "width": 50,
-        "height": 50,
+        "title": "ClickyAI Guide",
+        "fullscreen": true,
         "transparent": true,
         "decorations": false,
         "alwaysOnTop": true,
