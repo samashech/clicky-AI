@@ -84,7 +84,10 @@ fn get_uia_bounding_box(target_name: &str) -> Option<(f64, f64, f64, f64)> {
 }
 
 #[cfg(not(target_os = "windows"))]
-fn get_uia_bounding_box(_: &str) -> Option<(f64, f64, f64, f64)> { None }
+fn get_uia_bounding_box(_: &str) -> Option<(f64, f64, f64, f64)> { 
+    // MOCK for Linux testing so we can see the UI animation without Ollama running!
+    Some((400.0, 300.0, 200.0, 80.0))
+}
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
