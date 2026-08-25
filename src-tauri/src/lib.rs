@@ -59,9 +59,22 @@ fn get_uia_bounding_box(target_name: &str) -> Option<(f64, f64, f64, f64)> {
                 
                 // Create a condition: Name == target_name
                 let name_bstr = BSTR::from(target_name);
-                let variant = windows::Win32::System::Variant::VARIANT::from(name_bstr);
                 
-                if let Ok(condition) = automation.CreatePropertyCondition(UIA_NamePropertyId, &variant) {
+                let variant = unsafe {
+                    let mut v: windows::Win32::System::Variant::VARIANT = std::mem::zeroed();
+                    v.Anonymous.Anonymous = std::mem::ManuallyDrop::new(windows::Win32::System::Variant::VARIANT_0_0 {
+                        vt: windows::Win32::System::Variant::VT_BSTR,
+                        wReserved1: 0,
+                        wReserved2: 0,
+                        wReserved3: 0,
+                        Anonymous: windows::Win32::System::Variant::VARIANT_0_0_0 {
+                            bstrVal: std::mem::ManuallyDrop::new(name_bstr),
+                        },
+                    });
+                    v
+                };
+                
+                if let Ok(condition) = automation.CreatePropertyCondition(UIA_NamePropertyId, variant) {
                     
                     // Walk the tree (Subtree scope searches all children recursively)
                     if let Ok(element) = root.FindFirst(TreeScope_Subtree, &condition) {
