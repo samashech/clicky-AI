@@ -6,7 +6,7 @@ It functions as an invisible overlay that tracks your mouse cursor globally acro
 
 ## Features
 
-- **Global Mouse Tracking**: Follows your cursor seamlessly across all applications.
+- **Global Mouse Tracking**: Follows your cursor seamlessly across all applicati
 - **Invisible Overlay**: Runs in a transparent, frameless window to feel like a true desktop companion.
 - **Screen Capture Vision**: Captures the screen at your exact cursor location when triggered.
 
