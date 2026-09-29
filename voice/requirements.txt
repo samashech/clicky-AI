@@ -1,0 +1,6 @@
+# Optional voice runtime; OCR requirements remain separate.
+sounddevice>=0.5,<0.6
+vosk==0.3.45
+pyttsx3>=2.98,<3
+# Wayland global shortcut portal client (no microphone access).
+dbus-next==0.2.3

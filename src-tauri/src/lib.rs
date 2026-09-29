@@ -1,267 +1,400 @@
-use tauri::{Manager, Emitter, AppHandle};
-use reqwest::Client;
-use serde::{Deserialize, Serialize};
-use base64::{Engine as _, engine::general_purpose};
-use std::sync::{Arc, Mutex};
-use std::thread;
-use rdev::{listen, Event, EventType};
+mod interaction;
+mod perception;
+mod platform;
+mod provider;
+mod session;
+mod task;
+mod voice;
+use session::Phase;
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Mutex,
+};
+use task::{Status, Task};
+use tauri::{AppHandle, Emitter, Manager};
+use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 
-#[derive(Serialize)]
-struct ParseRequest {
-    image_base64: String,
+struct FrameCache {
+    image: Vec<u8>,
+    origin: (f64, f64),
+    elements: Vec<task::UIElement>,
 }
-
-#[derive(Deserialize, Debug, Clone)]
-struct ParsedElement {
-    id: i32,
-    #[serde(rename = "type")]
-    element_type: String,
-    text: String,
-    box_coords: [f64; 4], // [x, y, width, height]
+#[derive(Default)]
+struct Runtime {
+    task: Mutex<Option<Task>>,
+    session: Mutex<session::Session>,
+    voice_config: Mutex<voice::Config>,
+    voice_error: Mutex<Option<String>>,
+    pointer: Mutex<Option<(f64, f64)>>,
+    config: Mutex<provider::Config>,
+    router: provider::Router,
+    generation: AtomicU64,
+    job: Mutex<Option<tauri::async_runtime::JoinHandle<()>>>,
+    portal_job: Mutex<Option<tauri::async_runtime::JoinHandle<()>>>,
+    hotkey: Mutex<String>,
+    input_error: Mutex<Option<String>>,
+    shortcut_error: Mutex<Option<String>>,
+    model_calls: AtomicU64,
+    frame_cache: Mutex<Option<FrameCache>>,
 }
-
-#[derive(Deserialize, Debug)]
-struct ParseResponse {
-    elements: Vec<ParsedElement>,
+fn publish(app: &AppHandle) {
+    let value = app.state::<Runtime>().task.lock().unwrap().clone();
+    let _ = app.emit("task-state", value);
 }
-
-#[derive(Deserialize, Serialize, Debug, Clone)]
-struct Coords {
-    x: f32,
-    y: f32,
-}
-
-// Global state to track the current active target bounding box [x, y, width, height]
-lazy_static::lazy_static! {
-    static ref ACTIVE_TARGET_RECT: Arc<Mutex<Option<(f64, f64, f64, f64)>>> = Arc::new(Mutex::new(None));
-}
-
-#[cfg(target_os = "windows")]
-fn get_uia_bounding_box(target_name: &str) -> Option<(f64, f64, f64, f64)> {
-    use windows::Win32::System::Com::{CoInitializeEx, CoUninitialize, COINIT_MULTITHREADED};
-    use windows::Win32::UI::Accessibility::{CUIAutomation, IUIAutomation, UIA_NamePropertyId, TreeScope_Subtree};
-    use windows::core::BSTR;
-
-    unsafe {
-        // Initialize COM for the background thread
-        let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
-        
-        let uia: Result<IUIAutomation, _> = windows::Win32::System::Com::CoCreateInstance(
-            &CUIAutomation, 
-            None, 
-            windows::Win32::System::Com::CLSCTX_INPROC_SERVER
-        );
-        
-        if let Ok(automation) = uia {
-            // Get the element directly under the mouse, or the active foreground window
-            // For a robust search, we start at the root desktop element
-            if let Ok(root) = automation.GetRootElement() {
-                
-                // Create a condition: Name == target_name
-                let name_bstr = BSTR::from(target_name);
-                
-                let variant = unsafe {
-                    let mut v: windows::Win32::System::Variant::VARIANT = std::mem::zeroed();
-                    v.Anonymous.Anonymous = std::mem::ManuallyDrop::new(windows::Win32::System::Variant::VARIANT_0_0 {
-                        vt: windows::Win32::System::Variant::VT_BSTR,
-                        wReserved1: 0,
-                        wReserved2: 0,
-                        wReserved3: 0,
-                        Anonymous: windows::Win32::System::Variant::VARIANT_0_0_0 {
-                            bstrVal: std::mem::ManuallyDrop::new(name_bstr),
-                        },
-                    });
-                    v
-                };
-                
-                if let Ok(condition) = automation.CreatePropertyCondition(UIA_NamePropertyId, variant) {
-                    
-                    // Walk the tree (Subtree scope searches all children recursively)
-                    if let Ok(element) = root.FindFirst(TreeScope_Subtree, &condition) {
-                        if let Ok(rect) = element.CurrentBoundingRectangle() {
-                            let _ = CoUninitialize();
-                            return Some((
-                                rect.left as f64, 
-                                rect.top as f64, 
-                                (rect.right - rect.left) as f64, 
-                                (rect.bottom - rect.top) as f64
-                            ));
-                        }
-                    }
-                }
-            }
-        }
-        let _ = CoUninitialize();
+fn control(app: &AppHandle) {
+    if let Some(w) = app.get_webview_window("control") {
+        let _ = w.show();
+        let _ = w.set_focus();
     }
-    None
 }
-
-#[cfg(not(target_os = "windows"))]
-fn get_uia_bounding_box(_: &str) -> Option<(f64, f64, f64, f64)> { 
-    // MOCK for Linux testing so we can see the UI animation without Ollama running!
-    Some((400.0, 300.0, 200.0, 80.0))
+fn hide_overlay(app: &AppHandle) {
+    if let Some(w) = app.get_webview_window("main") {
+        let _ = w.hide();
+    }
 }
-
-#[cfg_attr(mobile, tauri::mobile_entry_point)]
-pub fn run() {
-    tauri::Builder::default()
-        .plugin(tauri_plugin_shell::init())
-        .setup(|app| {
-            let window = app.get_webview_window("main").unwrap();
-
-            // Spawn the Python Sidecar Server
-            use tauri_plugin_shell::ShellExt;
-            match app.shell().sidecar("omni_server") {
-                Ok(command) => {
-                    if let Err(e) = command.spawn() {
-                        println!("Failed to spawn sidecar: {}", e);
-                    } else {
-                        println!("OmniServer sidecar spawned successfully!");
-                    }
-                }
-                Err(e) => println!("Could not find sidecar: {}", e),
-            }
-
-            // --- Pillar 1: Win32 Spotlight Layer Configuration ---
-            #[cfg(target_os = "windows")]
-            {
-                use windows::Win32::UI::WindowsAndMessaging::{GetWindowLongW, SetWindowLongW, GWL_EXSTYLE, WS_EX_LAYERED, WS_EX_TRANSPARENT, WS_EX_TOPMOST};
-                use windows::Win32::Foundation::HWND;
-                
-                let hwnd = HWND(window.hwnd().unwrap().0 as isize);
-                unsafe {
-                    let ex_style = GetWindowLongW(hwnd, GWL_EXSTYLE);
-                    // Force the window to be a topmost, click-through overlay
-                    SetWindowLongW(hwnd, GWL_EXSTYLE, ex_style | (WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOPMOST).0 as i32);
-                }
-            }
-            
-            // Allow Tauri to ignore clicks cross-platform just in case
-            let _ = window.set_ignore_cursor_events(true);
-
-            // --- Pillar 4: Step Verification via rdev global hooks ---
-            let app_handle = app.handle().clone();
-            thread::spawn(move || {
-                let callback = move |event: Event| {
-                    match event.event_type {
-                        EventType::MouseMove { x, y } => {
-                            // Stream live coordinates to frontend for Bezier path
-                            let _ = app_handle.emit("mouse-move", Coords { x: x as f32, y: y as f32 });
-                        }
-                        EventType::ButtonPress(rdev::Button::Left) => {
-                            let rect_lock = ACTIVE_TARGET_RECT.lock().unwrap();
-                            if let Some((_rx, _ry, _rw, _rh)) = *rect_lock {
-                                // We don't have mouse coords in ButtonPress event directly, 
-                                // but we can track them via MouseMove state. For brevity, assuming a hit-test here:
-                                // let (mx, my) = get_last_mouse_coords();
-                                // if mx >= rx && mx <= rx + rw && my >= ry && my <= ry + rh { ... }
-                                
-                                let _ = app_handle.emit("step-success", ());
-                            }
-                        }
-                        _ => {}
-                    }
-                };
-                if let Err(error) = listen(callback) {
-                    println!("Error listening to rdev: {:?}", error);
-                }
-            });
-
-            Ok(())
-        })
-        .invoke_handler(tauri::generate_handler![process_ai_step])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+fn stop(app: &AppHandle) {
+    let state = app.state::<Runtime>();
+    state.generation.fetch_add(1, Ordering::SeqCst);
+    if let Some(job) = state.job.lock().unwrap().take() {
+        job.abort();
+        eprintln!(
+            "{}",
+            serde_json::json!({"event":"inference_cancelled","classification":provider::Error::Cancelled})
+        );
+    }
+    hide_overlay(app);
+    *state.frame_cache.lock().unwrap() = None;
+    state.router.clear();
 }
 
 #[tauri::command]
-async fn process_ai_step(app: AppHandle, user_prompt: String, target_hint: String) -> Result<(), String> {
-    
-    // ==========================================
-    // STEP 1: Attempt Windows UIA Fast-Path
-    // ==========================================
-    if let Some(rect) = get_uia_bounding_box(&target_hint) {
-        println!("Found via UIA! Skipping vision models.");
-        *ACTIVE_TARGET_RECT.lock().unwrap() = Some(rect);
-        let _ = app.emit("draw-spotlight", rect);
-        return Ok(());
+fn cancel_task(app: AppHandle) {
+    stop(&app);
+    if let Some(task) = app.state::<Runtime>().task.lock().unwrap().as_mut() {
+        task.status = Status::Cancelled;
     }
-
-    println!("UIA failed. Falling back to local OmniParser & Ollama...");
-
-    // ==========================================
-    // STEP 2: Capture Screen & Send to Local Parser
-    // ==========================================
-    let mut base64_image = String::new();
-    if let Ok(screens) = screenshots::Screen::all() {
-        if let Some(screen) = screens.first() {
-            if let Ok(image) = screen.capture() {
-                // For simplicity, buffer through the filesystem as in the previous pipeline
-                let _ = image.save("/tmp/clickyai_vision.png");
-                if let Ok(bytes) = std::fs::read("/tmp/clickyai_vision.png") {
-                    base64_image = general_purpose::STANDARD.encode(&bytes);
+    publish(&app);
+    interaction::idle(&app);
+}
+#[tauri::command]
+fn diagnostics(app: AppHandle) -> serde_json::Value {
+    let state = app.state::<Runtime>();
+    let mut result = platform::diagnostics();
+    result["input_error"] = serde_json::json!(*state.input_error.lock().unwrap());
+    result["shortcut_error"] = serde_json::json!(*state.shortcut_error.lock().unwrap());
+    result["hotkey"] = serde_json::json!(*state.hotkey.lock().unwrap());
+    result["voice_error"] = serde_json::json!(*state.voice_error.lock().unwrap());
+    result["runtime"] = serde_json::json!(*state.session.lock().unwrap());
+    result
+}
+#[tauri::command]
+fn configure(app: AppHandle, config: provider::Config, hotkey: String) -> Result<(), String> {
+    if hotkey.len() > 80 || hotkey.eq_ignore_ascii_case("Escape") {
+        return Err("Invalid shortcut".into());
+    }
+    let state = app.state::<Runtime>();
+    let old = state.hotkey.lock().unwrap().clone();
+    if old != hotkey && !platform::wayland() {
+        app.global_shortcut()
+            .register(hotkey.as_str())
+            .map_err(|e| e.to_string())?;
+        if !old.is_empty() {
+            let _ = app.global_shortcut().unregister(old.as_str());
+        }
+        *state.hotkey.lock().unwrap() = hotkey;
+        *state.shortcut_error.lock().unwrap() = None;
+    }
+    *state.config.lock().unwrap() = config;
+    Ok(())
+}
+#[tauri::command]
+fn start_task(app: AppHandle, goal: String, mode: String) -> Result<(), String> {
+    if !["guide", "explain", "teach"].contains(&mode.as_str()) {
+        return Err("Invalid guidance mode".into());
+    }
+    cancel_task(app.clone());
+    interaction::phase(&app, Phase::Activating, "Starting…");
+    interaction::phase(&app, Phase::Thinking, "Thinking…");
+    if let Err(error) = interaction::begin(&app, &goal, &mode) {
+        fail(&app, error.clone());
+        return Err(error);
+    }
+    if let Some(w) = app.get_webview_window("control") {
+        let _ = w.hide();
+    }
+    schedule(&app);
+    Ok(())
+}
+fn schedule(app: &AppHandle) {
+    let handle = app.clone();
+    let job = tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        ground(handle).await;
+    });
+    *app.state::<Runtime>().job.lock().unwrap() = Some(job);
+}
+async fn ground(app: AppHandle) {
+    let state = app.state::<Runtime>();
+    let generation = state.generation.load(Ordering::SeqCst);
+    let (instruction, hint, needs_plan) = {
+        let mut guard = state.task.lock().unwrap();
+        let Some(task) = guard.as_mut() else { return };
+        if task.current >= task.steps.len() {
+            return;
+        }
+        task.status = Status::Looking;
+        task.steps[task.current].status = Status::Looking;
+        (
+            task.steps[task.current].instruction.clone(),
+            task.steps[task.current].target_hint.clone(),
+            task.needs_plan,
+        )
+    };
+    publish(&app);
+    hide_overlay(&app);
+    interaction::phase(&app, Phase::AnalyzingScreen, "Looking at the application…");
+    let started = std::time::Instant::now();
+    let result=async {
+        let native_hint=hint.clone();
+        let native=tauri::async_runtime::spawn_blocking(move||if needs_plan{None}else{perception::native(&native_hint)}).await.map_err(|e|e.to_string())?;
+        if let Some(target)=native{return Ok(target);}
+        let pointer=state.pointer.lock().unwrap().ok_or("Move the pointer over the application and try again")?;
+        if let Some(hud)=app.get_webview_window("indicator"){let _=hud.hide();}
+        tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+        let (image,origin)=tauri::async_runtime::spawn_blocking(move||perception::capture(pointer)).await.map_err(|e|e.to_string())??;
+        interaction::phase(&app,Phase::AnalyzingScreen,"Reading visible controls…");
+        let script=if cfg!(debug_assertions){std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../omni_server/main.py")}else{app.path().resource_dir().map_err(|e|e.to_string())?.join("perception/main.py")};
+        let cached={let cache=state.frame_cache.lock().unwrap();cache.as_ref().filter(|c|c.origin==origin && c.image==image).map(|c|c.elements.clone())};
+        let elements=if let Some(elements)=cached {elements} else {
+            let elements=perception::ocr(script,image.clone(),origin).await?;
+            *state.frame_cache.lock().unwrap()=Some(FrameCache{image,origin,elements:elements.clone()});elements
+        };
+        let config=state.config.lock().unwrap().clone();
+        let hint=if needs_plan {
+            interaction::phase(&app,Phase::Planning,"Planning the steps…");
+            if config.kind==provider::Kind::Disabled{return Err("For a tutorial, choose a reasoning model in Settings. Without a model, ask me to find a named control.".into());}
+            if state.model_calls.fetch_add(1,Ordering::SeqCst)>=4{return Err("Task reasoning budget reached".into());}
+            match state.router.plan(&config,&instruction,&elements).await.map_err(|e|format!("Planning unavailable ({e:?}). Try asking for a specific control."))? {
+                provider::Decision::Plan{steps}=>{let mut task=state.task.lock().unwrap();let task=task.as_mut().ok_or("Task missing")?;task.apply_plan(steps)?;task.steps[0].target_hint.clone()},
+                provider::Decision::AskUser{question}=>return Err(question),_=>return Err("Invalid task plan".into())
+            }
+        }else{hint};
+        if let Some(target)=task::exact_match(&hint,&elements){return Ok(target.clone());}
+        interaction::phase(&app,Phase::Planning,"Finding the right control…");
+        let config=state.config.lock().unwrap().clone();
+        if config.kind==provider::Kind::Disabled{return Err("No unique visible label found. Use the exact control label, or configure a reasoning provider.".into());}
+        if state.model_calls.fetch_add(1,Ordering::SeqCst)>=4{return Err("Task reasoning budget reached. Refine the request.".into());}
+        match state.router.select(&config,&instruction,&elements).await.map_err(|e|format!("Reasoning unavailable ({e:?}). Local matching remains available; try an exact visible label."))? {
+            provider::Decision::Highlight{target_id,confidence,..} if confidence>=0.65=>elements.into_iter().find(|e|e.id==target_id).ok_or("Selected target disappeared".into()),
+            provider::Decision::AskUser{question}=>Err(question),
+            _=>Err("I'm not sure which control you mean. Use its visible label.".into())
+        }
+    }.await;
+    if generation != state.generation.load(Ordering::SeqCst) {
+        return;
+    }
+    match result {
+        Ok(target) => {
+            let show = (|| -> Result<task::Step, String> {
+                let w = app
+                    .get_webview_window("main")
+                    .ok_or("Overlay unavailable")?;
+                let monitor = w
+                    .monitor_from_point(
+                        target.bounds.x + target.bounds.width / 2.,
+                        target.bounds.y + target.bounds.height / 2.,
+                    )
+                    .map_err(|e| e.to_string())?
+                    .ok_or("Target monitor unavailable")?;
+                w.set_fullscreen(false).map_err(|e| e.to_string())?;
+                w.set_position(*monitor.position())
+                    .map_err(|e| e.to_string())?;
+                w.set_size(*monitor.size()).map_err(|e| e.to_string())?;
+                let rect = target.bounds.logical(
+                    (monitor.position().x as f64, monitor.position().y as f64),
+                    monitor.scale_factor(),
+                );
+                let step = {
+                    let mut guard = state.task.lock().unwrap();
+                    let task = guard.as_mut().ok_or("Task missing")?;
+                    task.select(target)?;
+                    task.steps[task.current].clone()
+                };
+                w.show().map_err(|e| e.to_string())?;
+                w.set_ignore_cursor_events(true)
+                    .map_err(|e| e.to_string())?;
+                w.set_focusable(false).map_err(|e| e.to_string())?;
+                app.emit_to("main","draw-spotlight",serde_json::json!({"bounds":rect,"step":step,"origin":[monitor.position().x,monitor.position().y],"scale":monitor.scale_factor()})).map_err(|e|e.to_string())?;
+                Ok(step)
+            })();
+            match show {
+                Err(error) => fail(&app, error),
+                Ok(step) => {
+                    interaction::phase(&app, Phase::Guiding, "Showing you…");
+                    interaction::phase(&app, Phase::Speaking, step.instruction.clone());
+                    let config = state.voice_config.lock().unwrap().synthesis.clone();
+                    let spoken = voice::speak(&app, &step.instruction, config).await;
+                    let message = if let Err(error) = spoken {
+                        *state.voice_error.lock().unwrap() = Some(error);
+                        "Speech unavailable · follow the highlight"
+                    } else {
+                        "Your turn · Alt+X to stop"
+                    };
+                    if generation == state.generation.load(Ordering::SeqCst) {
+                        interaction::phase(&app, Phase::WaitingForUser, message);
+                    }
                 }
             }
         }
+        Err(error) => fail(&app, error),
     }
-
-    let client = Client::new();
-    let parse_res = client.post("http://127.0.0.1:8000/parse")
-        .json(&ParseRequest { image_base64: base64_image })
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
-
-    let parsed_data: ParseResponse = parse_res.json().await.map_err(|e| e.to_string())?;
-
-    // ==========================================
-    // STEP 3: Ask Local Ollama to pick the ID
-    // ==========================================
-    // Convert the parsed elements into a readable string for the LLM
-    let mut elements_text = String::from("On screen elements:\n");
-    for el in &parsed_data.elements {
-        elements_text.push_str(&format!("ID: {}, Type: {}, Text: '{}'\n", el.id, el.element_type, el.text));
-    }
-
-    let llm_prompt = format!(
-        "You are a UI routing assistant. The user wants to: '{}'. \n\
-         Based on the following UI elements, return ONLY the integer ID of the element they should click. Do not output any other text.\n{}", 
-        user_prompt, elements_text
+    eprintln!(
+        "{}",
+        serde_json::json!({"event":"grounding_finished","task_id":generation,"elapsed_ms":started.elapsed().as_millis()})
     );
-
-    let ollama_payload = serde_json::json!({
-        "model": "llama3.2",
-        "prompt": llm_prompt,
-        "stream": false
-    });
-
-    let ollama_res = client.post("http://127.0.0.1:11434/api/generate")
-        .json(&ollama_payload)
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
-
-    let ollama_json: serde_json::Value = ollama_res.json().await.map_err(|e| e.to_string())?;
-    
-    // Parse the returned ID
-    if let Some(response_text) = ollama_json["response"].as_str() {
-        let selected_id: i32 = response_text.trim().parse().unwrap_or(-1);
-        
-        // Find the bounding box matching the ID
-        if let Some(element) = parsed_data.elements.iter().find(|e| e.id == selected_id) {
-            let rect = (
-                element.box_coords[0],
-                element.box_coords[1],
-                element.box_coords[2],
-                element.box_coords[3],
-            );
-            
-            // Trigger frontend spotlight
-            *ACTIVE_TARGET_RECT.lock().unwrap() = Some(rect);
-            let _ = app.emit("draw-spotlight", rect);
-            return Ok(());
-        }
+    publish(&app);
+}
+fn fail(app: &AppHandle, message: String) {
+    if let Some(task) = app.state::<Runtime>().task.lock().unwrap().as_mut() {
+        task.status = Status::Uncertain;
+        task.message = message.clone();
     }
+    hide_overlay(app);
+    interaction::error(app, message);
+}
 
-    Err("AI could not determine the correct element.".to_string())
+pub fn run() {
+    let builder = tauri::Builder::default().manage(Runtime::default());
+    let builder = if !platform::wayland() {
+        builder.plugin(
+            tauri_plugin_global_shortcut::Builder::new()
+                .with_handler(|app, shortcut, event| {
+                    if event.state == ShortcutState::Pressed {
+                        if shortcut.key == tauri_plugin_global_shortcut::Code::Escape {
+                            cancel_task(app.clone());
+                        } else {
+                            interaction::activate(app.clone());
+                        }
+                    }
+                })
+                .build(),
+        )
+    } else {
+        builder
+    };
+    builder
+        .setup(|app| {
+            interaction::tray(app)?;
+            interaction::portal(app.handle(), false);
+            let state = app.state::<Runtime>();
+            if !platform::wayland() {
+                match app.global_shortcut().register("Alt+X") {
+                    Ok(()) => *state.hotkey.lock().unwrap() = "Alt+X".into(),
+                    Err(_) => {
+                        *state.shortcut_error.lock().unwrap() = Some(
+                            "Global shortcut registration failed; configure another shortcut"
+                                .into(),
+                        )
+                    }
+                }
+            }
+            if !platform::wayland() {
+                let handle = app.handle().clone();
+                std::thread::spawn(move || {
+                    let events = handle.clone();
+                    let mut last = std::time::Instant::now();
+                    let result = rdev::listen(move |event| {
+                        let state = events.state::<Runtime>();
+                        match event.event_type {
+                            rdev::EventType::MouseMove { x, y } => {
+                                *state.pointer.lock().unwrap() = Some((x, y));
+                                let active = state
+                                    .task
+                                    .lock()
+                                    .unwrap()
+                                    .as_ref()
+                                    .is_some_and(|t| t.status == Status::Waiting);
+                                if active && last.elapsed() >= std::time::Duration::from_millis(16)
+                                {
+                                    let _ = events.emit_to(
+                                        "main",
+                                        "mouse-move",
+                                        serde_json::json!({"x":x,"y":y}),
+                                    );
+                                    last = std::time::Instant::now();
+                                }
+                            }
+                            rdev::EventType::ButtonPress(rdev::Button::Left) => {
+                                let pointer = *state.pointer.lock().unwrap();
+                                if let Some((x, y)) = pointer {
+                                    let advanced = {
+                                        let mut task = state.task.lock().unwrap();
+                                        task.as_mut().is_some_and(|t| t.click(x, y))
+                                    };
+                                    if advanced {
+                                        interaction::phase(
+                                            &events,
+                                            Phase::Verifying,
+                                            "Checking the click…",
+                                        );
+                                        if let Some(job) = state.job.lock().unwrap().take() {
+                                            job.abort();
+                                        }
+                                        hide_overlay(&events);
+                                        publish(&events);
+                                        let complete = state
+                                            .task
+                                            .lock()
+                                            .unwrap()
+                                            .as_ref()
+                                            .is_some_and(|t| t.status == Status::Complete);
+                                        if complete {
+                                            interaction::finish(&events);
+                                        } else {
+                                            let app = events.clone();
+                                            let job = tauri::async_runtime::spawn(async move {
+                                                tokio::time::sleep(
+                                                    std::time::Duration::from_millis(500),
+                                                )
+                                                .await;
+                                                ground(app).await;
+                                            });
+                                            *state.job.lock().unwrap() = Some(job);
+                                        }
+                                    }
+                                }
+                            }
+                            _ => {}
+                        }
+                    });
+                    if result.is_err() {
+                        *handle.state::<Runtime>().input_error.lock().unwrap() =
+                            Some("Global pointer hook failed".into());
+                    }
+                });
+            }
+            Ok(())
+        })
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                api.prevent_close();
+                let _ = window.hide();
+            }
+        })
+        .invoke_handler(tauri::generate_handler![
+            start_task,
+            cancel_task,
+            diagnostics,
+            configure,
+            interaction::activate,
+            interaction::pause,
+            interaction::open_settings,
+            interaction::runtime_state,
+            interaction::configure_voice,
+            interaction::voice_settings,
+            interaction::voice_diagnostics,
+            interaction::enable_wayland_hotkey
+        ])
+        .run(tauri::generate_context!())
+        .expect("ClickyAI native initialization failed");
 }

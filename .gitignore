@@ -26,3 +26,10 @@ dist-ssr
 # Rust / Tauri Backend
 /src-tauri/target/
 .env
+
+# Local perception / Python
+__pycache__/
+*.pyc
+.venv/
+
+.models/

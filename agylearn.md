@@ -1,3 +1,5 @@
+> Historical prototype learning notes. Some APIs, paths and behavior below are obsolete. See README.md and ARCHITECTURE.md for the current implementation.
+
 # ClickyAI: Rust & Tauri Crash Course
 
 Welcome to your learning log! This file will document all the new concepts and troubleshooting steps you learn while building the ClickyAI tool. 

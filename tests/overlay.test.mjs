@@ -1,0 +1,22 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {readFile} from 'node:fs/promises';
+import vm from 'node:vm';
+import {localPoint,curve} from '../src/geometry.js';
+test('overlay handles target, scaled pointer, and cancellation events',async()=>{
+    const handlers=new Map(),elements=new Map();
+    const document={body:{hidden:false},getElementById(id){if(!elements.has(id))elements.set(id,{attributes:{},style:{},setAttribute(key,value){this.attributes[key]=value;}});return elements.get(id);}};
+    let animation;
+    const context=vm.createContext({document,localPoint,curve,window:{__TAURI__:{event:{listen:async(name,callback)=>handlers.set(name,callback)}}},innerWidth:1920,innerHeight:1080,requestAnimationFrame:callback=>{animation=callback;return 1;}});
+    const source=(await readFile(new URL('../src/main.js',import.meta.url),'utf8')).replace(/^import .*;\n/,'');
+    await vm.runInContext(`(async()=>{${source}})()`,context);
+    assert.equal(document.body.hidden,true);
+    handlers.get('draw-spotlight')({payload:{bounds:{x:10,y:20,width:50,height:30},origin:[-1920,0],scale:2,step:{id:0,instruction:'Click File'}}});
+    assert.equal(document.body.hidden,false);
+    assert.equal(elements.get('spotlight-hole').attributes.x,3);
+    handlers.get('mouse-move')({payload:{x:-1900,y:40}});animation();
+    assert.match(elements.get('guide-line').attributes.d,/^M 10 20 /);
+    handlers.get('task-state')({payload:{status:'cancelled'}});
+    assert.equal(document.body.hidden,true);
+    assert.equal(elements.get('guide-line').attributes.d,'');
+});

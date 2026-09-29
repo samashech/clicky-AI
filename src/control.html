@@ -1,0 +1,19 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>ClickyAI Settings</title><link rel="stylesheet" href="control.css"></head><body><main>
+<header><span class="orb"></span><div><h1>Settings</h1><p>ClickyAI stays in the background. Alt+X starts listening.</p></div></header>
+<p id="status" role="status" aria-live="polite">Microphone off while idle. Local voice by default.</p>
+<details open><summary>Voice</summary><form id="voice-form">
+<label for="stt-provider">Speech recognition</label><select id="stt-provider"><option value="local">Local · Vosk offline</option><option value="cloud">Cloud · transcription API</option></select>
+<label for="model-path">Offline model folder</label><input id="model-path" placeholder="Path to an extracted Vosk model">
+<label for="microphone">Microphone device ID (blank = default)</label><input id="microphone" type="number" min="0" placeholder="System default">
+<label for="stt-endpoint">Cloud transcription endpoint</label><input id="stt-endpoint" type="url"><label for="stt-model">Cloud speech model</label><input id="stt-model">
+<label for="tts-provider">Speech output</label><select id="tts-provider"><option value="local">Local · Windows SAPI / eSpeak NG</option><option value="cloud">Cloud · speech API</option></select>
+<label for="tts-voice">Voice identifier (blank = local default)</label><input id="tts-voice"><label for="tts-endpoint">Cloud speech output endpoint</label><input id="tts-endpoint" type="url"><label for="tts-model">Cloud output model</label><input id="tts-model">
+<label class="check"><input id="cloud-audio" type="checkbox"> Allow microphone audio and spoken text to the selected cloud voice providers</label>
+<p class="hint">Cloud voice is optional. Keys come from CLICKY_SPEECH_API_KEY. Voice dependencies and an offline model must be installed for local recognition. Linux speech output requires eSpeak NG.</p><button>Apply voice settings</button></form></details>
+<details><summary>Activation & reasoning</summary><form id="settings-form"><button id="portal-hotkey" type="button" class="secondary">Enable Wayland activation shortcut</button><label for="hotkey">Activation / cancel shortcut</label><input id="hotkey" value="Alt+X" required>
+<label for="provider">Reasoning provider</label><select id="provider"><option value="disabled">No model · local label matching</option><option value="local">Local · Ollama compatible</option><option value="open_ai_compatible">OpenAI compatible</option><option value="gemini">Gemini</option></select>
+<label for="endpoint">Complete reasoning endpoint</label><input id="endpoint" type="url"><label for="model">Model</label><input id="model">
+<label class="check"><input id="cloud" type="checkbox"> Allow cloud reasoning with visible UI text</label><p class="hint">Screenshots are never sent to cloud. Reasoning keys come from CLICKY_API_KEY. No task or audio history is stored. Preferences currently last for this session.</p><button>Apply preferences</button></form></details>
+<details id="diagnostics"><summary>Diagnostics</summary><button id="refresh-diagnostics" class="secondary">Check voice devices</button><pre id="capabilities"></pre><pre id="voice-capabilities"></pre></details>
+<details><summary>Optional typed request</summary><form id="task-form"><label for="goal">Request</label><textarea id="goal" required maxlength="2000" placeholder="Where is the export button?"></textarea><select id="mode" aria-label="Guidance mode"><option value="guide">Guide</option><option value="explain">Explain</option><option value="teach">Teach</option></select><div class="actions"><button>Guide me</button><button type="button" id="cancel" class="secondary">Stop</button></div></form><ol id="steps"></ol></details>
+<footer>Closing Settings returns to the background. Quit from the tray.</footer></main><script type="module" src="control.js"></script></body></html>
