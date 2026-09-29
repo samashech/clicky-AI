@@ -1,3 +1,4 @@
+mod hyprland;
 mod interaction;
 mod perception;
 mod platform;
@@ -30,6 +31,8 @@ struct Runtime {
     router: provider::Router,
     generation: AtomicU64,
     job: Mutex<Option<tauri::async_runtime::JoinHandle<()>>>,
+    status_job: Mutex<Option<tauri::async_runtime::JoinHandle<()>>>,
+    overlay_job: Mutex<Option<tauri::async_runtime::JoinHandle<()>>>,
     portal_job: Mutex<Option<tauri::async_runtime::JoinHandle<()>>>,
     hotkey: Mutex<String>,
     input_error: Mutex<Option<String>>,
@@ -48,6 +51,9 @@ fn control(app: &AppHandle) {
     }
 }
 fn hide_overlay(app: &AppHandle) {
+    if let Some(job) = app.state::<Runtime>().overlay_job.lock().unwrap().take() {
+        job.abort();
+    }
     if let Some(w) = app.get_webview_window("main") {
         let _ = w.hide();
     }
@@ -158,10 +164,11 @@ async fn ground(app: AppHandle) {
         let native_hint=hint.clone();
         let native=tauri::async_runtime::spawn_blocking(move||if needs_plan{None}else{perception::native(&native_hint)}).await.map_err(|e|e.to_string())?;
         if let Some(target)=native{return Ok(target);}
-        let pointer=state.pointer.lock().unwrap().ok_or("Move the pointer over the application and try again")?;
+        let pointer=if hyprland::available(){(0.,0.)}else{state.pointer.lock().unwrap().ok_or("Move the pointer over the application and try again")?};
+        if hyprland::available(){hyprland::status(&app,None);}
         if let Some(hud)=app.get_webview_window("indicator"){let _=hud.hide();}
         tokio::time::sleep(std::time::Duration::from_millis(80)).await;
-        let (image,origin)=tauri::async_runtime::spawn_blocking(move||perception::capture(pointer)).await.map_err(|e|e.to_string())??;
+        let (image,origin)=if hyprland::available(){hyprland::capture().await?}else{tauri::async_runtime::spawn_blocking(move||perception::capture(pointer)).await.map_err(|e|e.to_string())??};
         interaction::phase(&app,Phase::AnalyzingScreen,"Reading visible controls…");
         let script=if cfg!(debug_assertions){std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../omni_server/main.py")}else{app.path().resource_dir().map_err(|e|e.to_string())?.join("perception/main.py")};
         let cached={let cache=state.frame_cache.lock().unwrap();cache.as_ref().filter(|c|c.origin==origin && c.image==image).map(|c|c.elements.clone())};
@@ -195,38 +202,56 @@ async fn ground(app: AppHandle) {
     }
     match result {
         Ok(target) => {
-            let show = (|| -> Result<task::Step, String> {
-                let w = app
-                    .get_webview_window("main")
-                    .ok_or("Overlay unavailable")?;
-                let monitor = w
-                    .monitor_from_point(
-                        target.bounds.x + target.bounds.width / 2.,
-                        target.bounds.y + target.bounds.height / 2.,
-                    )
-                    .map_err(|e| e.to_string())?
-                    .ok_or("Target monitor unavailable")?;
-                w.set_fullscreen(false).map_err(|e| e.to_string())?;
-                w.set_position(*monitor.position())
-                    .map_err(|e| e.to_string())?;
-                w.set_size(*monitor.size()).map_err(|e| e.to_string())?;
-                let rect = target.bounds.logical(
-                    (monitor.position().x as f64, monitor.position().y as f64),
-                    monitor.scale_factor(),
-                );
-                let step = {
+            let show = if hyprland::available() {
+                let selected = {
                     let mut guard = state.task.lock().unwrap();
-                    let task = guard.as_mut().ok_or("Task missing")?;
-                    task.select(target)?;
-                    task.steps[task.current].clone()
+                    match guard.as_mut() {
+                        Some(task) => task
+                            .select(target)
+                            .map(|_| task.steps[task.current].clone()),
+                        None => Err("Task missing".into()),
+                    }
                 };
-                w.show().map_err(|e| e.to_string())?;
-                w.set_ignore_cursor_events(true)
-                    .map_err(|e| e.to_string())?;
-                w.set_focusable(false).map_err(|e| e.to_string())?;
-                app.emit_to("main","draw-spotlight",serde_json::json!({"bounds":rect,"step":step,"origin":[monitor.position().x,monitor.position().y],"scale":monitor.scale_factor()})).map_err(|e|e.to_string())?;
-                Ok(step)
-            })();
+                match selected {
+                    Ok(step) => hyprland::show(&app, step.clone(), generation)
+                        .await
+                        .map(|_| step),
+                    Err(error) => Err(error),
+                }
+            } else {
+                (|| -> Result<task::Step, String> {
+                    let w = app
+                        .get_webview_window("main")
+                        .ok_or("Overlay unavailable")?;
+                    let monitor = w
+                        .monitor_from_point(
+                            target.bounds.x + target.bounds.width / 2.,
+                            target.bounds.y + target.bounds.height / 2.,
+                        )
+                        .map_err(|e| e.to_string())?
+                        .ok_or("Target monitor unavailable")?;
+                    w.set_fullscreen(false).map_err(|e| e.to_string())?;
+                    w.set_position(*monitor.position())
+                        .map_err(|e| e.to_string())?;
+                    w.set_size(*monitor.size()).map_err(|e| e.to_string())?;
+                    let rect = target.bounds.logical(
+                        (monitor.position().x as f64, monitor.position().y as f64),
+                        monitor.scale_factor(),
+                    );
+                    let step = {
+                        let mut guard = state.task.lock().unwrap();
+                        let task = guard.as_mut().ok_or("Task missing")?;
+                        task.select(target)?;
+                        task.steps[task.current].clone()
+                    };
+                    w.show().map_err(|e| e.to_string())?;
+                    w.set_ignore_cursor_events(true)
+                        .map_err(|e| e.to_string())?;
+                    w.set_focusable(false).map_err(|e| e.to_string())?;
+                    app.emit_to("main","draw-spotlight",serde_json::json!({"bounds":rect,"step":step,"origin":[monitor.position().x,monitor.position().y],"scale":monitor.scale_factor()})).map_err(|e|e.to_string())?;
+                    Ok(step)
+                })()
+            };
             match show {
                 Err(error) => fail(&app, error),
                 Ok(step) => {
@@ -234,11 +259,19 @@ async fn ground(app: AppHandle) {
                     interaction::phase(&app, Phase::Speaking, step.instruction.clone());
                     let config = state.voice_config.lock().unwrap().synthesis.clone();
                     let spoken = voice::speak(&app, &step.instruction, config).await;
+                    eprintln!(
+                        "{}",
+                        serde_json::json!({"event":"speech_finished","task_id":generation,"success":spoken.is_ok()})
+                    );
                     let message = if let Err(error) = spoken {
                         *state.voice_error.lock().unwrap() = Some(error);
                         "Speech unavailable · follow the highlight"
                     } else {
-                        "Your turn · Alt+X to stop"
+                        if hyprland::available() {
+                            "Your turn · confirm in the instruction popup"
+                        } else {
+                            "Your turn · Alt+X to stop"
+                        }
                     };
                     if generation == state.generation.load(Ordering::SeqCst) {
                         interaction::phase(&app, Phase::WaitingForUser, message);
@@ -253,6 +286,35 @@ async fn ground(app: AppHandle) {
         serde_json::json!({"event":"grounding_finished","task_id":generation,"elapsed_ms":started.elapsed().as_millis()})
     );
     publish(&app);
+}
+fn confirm_hyprland_step(app: &AppHandle, step_id: usize) {
+    let state = app.state::<Runtime>();
+    let advanced = state
+        .task
+        .lock()
+        .unwrap()
+        .as_mut()
+        .is_some_and(|t| t.confirm(step_id));
+    if !advanced {
+        return;
+    }
+    interaction::phase(app, Phase::Verifying, "Action confirmed by you");
+    if let Some(job) = state.job.lock().unwrap().take() {
+        job.abort();
+    }
+    hide_overlay(app);
+    publish(app);
+    let complete = state
+        .task
+        .lock()
+        .unwrap()
+        .as_ref()
+        .is_some_and(|t| t.status == Status::Complete);
+    if complete {
+        interaction::finish(app);
+    } else {
+        schedule(app);
+    }
 }
 fn fail(app: &AppHandle, message: String) {
     if let Some(task) = app.state::<Runtime>().task.lock().unwrap().as_mut() {
@@ -372,6 +434,20 @@ pub fn run() {
                             Some("Global pointer hook failed".into());
                     }
                 });
+            }
+            // Explicit CLI fallback for testing or desktops without a shortcut portal.
+            // Activation remains silent unless the user supplied --guide.
+            let args: Vec<String> = std::env::args().collect();
+            if let Some(index) = args.iter().position(|arg| arg == "--guide") {
+                if let Some(goal) = args.get(index + 1).cloned() {
+                    let handle = app.handle().clone();
+                    tauri::async_runtime::spawn(async move {
+                        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                        if let Err(error) = start_task(handle.clone(), goal, "guide".into()) {
+                            fail(&handle, error);
+                        }
+                    });
+                }
             }
             Ok(())
         })

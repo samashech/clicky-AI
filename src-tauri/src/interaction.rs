@@ -20,6 +20,22 @@ pub fn phase(app: &AppHandle, next: Phase, message: impl Into<String>) {
     if let Some(tray) = app.tray_by_id("clicky") {
         let _ = tray.set_tooltip(Some(format!("ClickyAI · {:?}", next)));
     }
+    if crate::hyprland::available() {
+        let has_overlay = state.overlay_job.lock().unwrap().is_some();
+        crate::hyprland::status(
+            app,
+            if matches!(
+                next,
+                Phase::Idle | Phase::Paused | Phase::Guiding | Phase::WaitingForUser
+            ) || (next == Phase::Speaking && has_overlay)
+            {
+                None
+            } else {
+                Some(snapshot.message.clone())
+            },
+        );
+        return;
+    }
     if let Some(window) = app.get_webview_window("indicator") {
         if matches!(next, Phase::Idle | Phase::Paused) {
             let _ = window.hide();
@@ -125,7 +141,7 @@ pub fn activate(app: AppHandle) {
 }
 pub fn begin(app: &AppHandle, goal: &str, mode: &str) -> Result<(), String> {
     let state = app.state::<Runtime>();
-    if crate::platform::wayland() {
+    if crate::platform::wayland() && !crate::hyprland::available() {
         return Err("I heard you, but native Wayland screen guidance is not available yet. Voice and tray controls remain available.".into());
     }
     if state.input_error.lock().unwrap().is_some() {
@@ -345,7 +361,9 @@ pub fn shutdown(app: AppHandle) {
         state.generation.fetch_add(1, Ordering::SeqCst);
         let job = state.job.lock().unwrap().take();
         let portal = state.portal_job.lock().unwrap().take();
-        for job in [job, portal].into_iter().flatten() {
+        let overlay = state.overlay_job.lock().unwrap().take();
+        let status = state.status_job.lock().unwrap().take();
+        for job in [job, portal, overlay, status].into_iter().flatten() {
             job.abort();
             let _ = job.await;
         }

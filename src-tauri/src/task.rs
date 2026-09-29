@@ -1,4 +1,5 @@
-//! All geometry is global physical pixels until the overlay boundary.
+//! Native Windows/X11 geometry is physical pixels; Hyprland uses logical pixels
+//! end-to-end with grim scale 1 and layer-shell (never mixed with native transforms).
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq)]
@@ -157,6 +158,26 @@ impl Task {
         self.status = Status::Waiting;
         Ok(())
     }
+    /// Explicit user attestation, deliberately distinct from observed pointer hits.
+    pub fn confirm(&mut self, step_id: usize) -> bool {
+        if self.status != Status::Waiting
+            || self.steps.get(self.current).is_none_or(|s| s.id != step_id)
+        {
+            return false;
+        }
+        let step = &mut self.steps[self.current];
+        step.verification_condition = "user_confirmation".into();
+        step.status = Status::Complete;
+        self.current += 1;
+        self.status = if self.current == self.steps.len() {
+            Status::Complete
+        } else {
+            Status::Looking
+        };
+        self.message =
+            "Action confirmed by user; no global click or application outcome was observed.".into();
+        true
+    }
     pub fn click(&mut self, x: f64, y: f64) -> bool {
         if self.status != Status::Waiting {
             return false;
@@ -273,6 +294,17 @@ mod tests {
             source: "uia".into(),
             actionable: true,
         }
+    }
+    #[test]
+    fn confirmation_is_explicit_and_rejects_stale_steps() {
+        let mut t = Task::new(1, "Click File then click Open", "guide").unwrap();
+        assert!(!t.confirm(0));
+        t.status = Status::Waiting;
+        let id = t.steps[0].id;
+        assert!(!t.confirm(id + 1));
+        assert!(t.confirm(id));
+        assert_eq!(t.steps[0].verification_condition, "user_confirmation");
+        assert!(!t.confirm(id));
     }
     #[test]
     fn clicks_only_advance_inside_target_once() {

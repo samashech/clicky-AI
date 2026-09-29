@@ -19,13 +19,7 @@ pub async fn ocr(
     if image.len() > 8 * 1024 * 1024 {
         return Err("Capture exceeds local image budget".into());
     }
-    let python = std::env::var("CLICKY_PYTHON").unwrap_or_else(|_| {
-        if cfg!(windows) {
-            "python".into()
-        } else {
-            "python3".into()
-        }
-    });
+    let python = crate::voice::python();
     let mut command = tokio::process::Command::new(python);
     command
         .arg(script)

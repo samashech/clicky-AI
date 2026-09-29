@@ -210,7 +210,7 @@ impl Router {
         };
         let body = match config.kind {
             Kind::Local => {
-                serde_json::json!({"model":config.model,"system":system,"prompt":prompt,"stream":false,"format":schema,"options":{"num_predict":output_tokens}})
+                serde_json::json!({"model":config.model,"system":system,"prompt":prompt,"stream":false,"think":false,"format":schema,"options":{"num_predict":output_tokens}})
             }
             Kind::Gemini => {
                 serde_json::json!({"systemInstruction":{"parts":[{"text":system}]},"contents":[{"parts":[{"text":prompt}]}],"generationConfig":{"responseMimeType":"application/json","maxOutputTokens":output_tokens}})

@@ -70,7 +70,9 @@
       "../omni_server/main.py": "perception/main.py",
       "../voice/worker.py": "voice/worker.py",
       "../voice/portal.py": "voice/portal.py",
-      "../voice/local_tts.py": "voice/local_tts.py"
+      "../voice/local_tts.py": "voice/local_tts.py",
+      "../desktop/hyprland_overlay.py": "desktop/hyprland_overlay.py",
+      "../desktop/hyprland_status.py": "desktop/hyprland_status.py"
     }
   }
 }

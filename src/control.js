@@ -18,7 +18,7 @@ $('settings-form').addEventListener('submit', async event => {
 });
 await listen('task-state', ({ payload: task }) => {
     if (!task) return;
-    const phase = task.status === 'complete' ? 'All clicks verified.' : `Step ${Math.min(task.current + 1, task.steps.length)} of ${task.steps.length} · ${task.status}`;
+    const phase = task.status === 'complete' ? 'Task completed.' : `Step ${Math.min(task.current + 1, task.steps.length)} of ${task.steps.length} · ${task.status}`;
     status(`${phase} ${task.message || ''}`);
     $('steps').replaceChildren(...task.steps.map(step => {const li=document.createElement('li');li.textContent=`${step.status === 'complete' ? '✓ ' : ''}${step.instruction}${task.mode === 'explain' && step.target ? ` — located by ${step.target.source}, ${Math.round(step.target.confidence * 100)}% confidence` : ''}`;return li;}));
 });
@@ -27,7 +27,7 @@ async function diagnostics() {
     $('capabilities').textContent=JSON.stringify(result, null, 2);
     if(result.session==='wayland') {
         $('hotkey').disabled=true;
-        status('Wayland detected. Voice activation is available through the tray; native screen guidance is not yet supported.');
+        status(result.hyprland ? 'Hyprland: local OCR and native guidance; confirm completed actions in the popup. Tray activation is available.' : 'Native guidance is not supported on this compositor.');
         document.querySelector('footer').textContent='Wayland shortcuts are desktop-managed. Use the tray if unavailable.';
     }
 }

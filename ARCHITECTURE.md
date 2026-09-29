@@ -1,7 +1,7 @@
 # ClickyAI architecture and implementation status
 
 This document describes the implemented foundation, not completion of the product mission.
-Windows is the primary target; Arch Linux is secondary. There is no mobile or macOS workstream.
+Current delivery focus is Arch/Hyprland; additional Windows implementation is on hold. There is no mobile or macOS workstream.
 
 ## Audit (2026-09-27)
 
@@ -27,6 +27,8 @@ flowchart TD
   Native --> Speech[Cancellable TTS worker]
   Hotkey[Native global shortcut] --> Native
   Native --> UIA[Windows foreground-window UIA]
+  Native --> Hyprland[Hyprland IPC + grim active-window capture]
+  Hyprland --> Worker
   Native --> Capture[On-demand active-window / monitor capture]
   Capture --> Worker[Python subprocess: real Tesseract OCR]
   Worker --> Elements[Normalized UI elements]
@@ -37,7 +39,8 @@ flowchart TD
   Router --> Cloud[Opt-in Gemini / OpenAI-compatible endpoint]
   Match --> Task[Structured task state]
   Router --> Task
-  Task --> Overlay[Transparent target-monitor webview]
+  Task --> Overlay[Windows/X11 target-monitor webview]
+  Task --> Layer[Hyprland GTK layer-shell worker: highlight + instruction panel]
   Input[Global pointer hook] --> HitTest[Physical coordinate hit test]
   HitTest --> Task
 ```
@@ -98,7 +101,11 @@ clipped to its monitor. X11 uses the pointer monitor. Python limits image pixels
 capture pixels. Exact duplicate images/origins reuse the last OCR result. This is byte-level
 deduplication; perceptual hashing and candidate-region recapture are not implemented.
 
-Coordinates are global physical pixels in Rust. UIA, captured OCR bounds and pointer hit tests
+Windows/X11 coordinates are global physical pixels in Rust. Hyprland is an explicitly separate
+logical-pixel path: `hyprctl` geometry, `grim -s 1`, OCR, pointer IPC and GTK layer-shell share logical
+coordinates. It never passes through the physical-monitor webview transform.
+
+For Windows/X11, UIA, captured OCR bounds and pointer hit tests
 share that space. At the overlay boundary, subtract the monitor origin then divide by that
 monitor's scale. Windows uses the screenshot dependency's physical capture entry point to avoid
 applying DPI twice. Tests cover negative origins and scale factors 1, 1.25, 1.5, 1.75 and 2.
@@ -137,16 +144,16 @@ telemetry are not implemented. The breaker currently covers the router, not indi
 |---|---|---|---|
 | Control window | Implemented; Windows runtime untested here | Implemented | Launched on this Arch/Hyprland host |
 | Activation shortcut | Native plugin; hardware validation pending | Native plugin; desktop validation pending | XDG portal client implemented; consent/key activation unverified |
-| Pointer/click observation | rdev native hook | rdev X11 hook | Disabled; no fabricated positions |
+| Pointer/click observation | rdev native hook | rdev X11 hook | Hyprland cursor IPC while guiding; no global click observation |
 | Accessibility | Foreground UIA exact match | AT-SPI not integrated | AT-SPI not integrated |
-| Local OCR capture | Active window / monitor | Pointer monitor | Portal capture not integrated |
-| Spatial overlay | Implemented; hardware validation pending | Implemented; runtime validation pending | Guidance disabled; stacking/positioning unverified |
-| Verification | Geometric hit | Geometric hit | Unavailable |
+| Local OCR capture | Active window / monitor | Pointer monitor | Hyprland grim active-window capture; other compositors unsupported |
+| Spatial overlay | Implemented; hardware validation pending | Implemented; runtime validation pending | Hyprland GTK layer-shell; real single-monitor smoke passed |
+| Verification | Geometric hit | Geometric hit | Explicit user confirmation; no fabricated click events |
 
 Diagnostics distinguish session type, desktop and Hyprland environment, input initialization
 errors and these limitations. Environment detection is not proof a portal or accessibility
 service is usable. Active portal probing, AT-SPI readiness, Hyprland cursor/window integration,
-portal capture consent, compositor positioning and semantic verification are the next Linux
+capture for other compositors and semantic verification are further Linux
 work. Forcing GDK to X11 does not turn a Wayland session into supported X11 desktop guidance.
 
 ## Privacy and observability
@@ -164,7 +171,7 @@ redaction, diagnostic export, comprehensive phase timings and secure OS key stor
 ## Packaging and validation
 
 `npm run tauri build` uses platform-specific bundle targets: NSIS on Windows, deb/rpm on Linux.
-Python sources are bundled as `perception/main.py` and `voice/{worker,portal,local_tts}.py`. The current installer does not provision
+Python sources are bundled as `perception/main.py` and `voice/{worker,portal,local_tts}.py`, plus `desktop/hyprland_{overlay,status}.py`. The current installer does not provision
 Python, OCR/voice modules, Tesseract, eSpeak NG or the Vosk model. Those are documented runtime prerequisites;
 UIA does not require them. Arch users can run the built binary with the development OCR path or
 package the release resource layout. An Arch PKGBUILD and self-contained OCR packaging are pending.
@@ -183,3 +190,13 @@ checks. See README for a manual demo and remaining acceptance gates.
 5. Broader tutorial actions, provider fallback chains and measured task token budgets.
 6. Wayland portal capture and Hyprland-aware guidance, with native action verification.
 7. Persistent preferences, appearance controls, performance measurements and release signing.
+
+## Hyprland guidance lifecycle
+
+`hyprland.rs` performs bounded IPC and in-memory capture off the UI thread. The overlay worker
+starts only for a grounded step. A full-monitor layer has an empty input region; a separate compact
+layer contains the spoken instruction and explicit confirmation/cancel buttons. Cursor IPC runs
+at 30 Hz only during guidance. Status messages use a non-focus-stealing native layer too.
+Rust owns and cancels both workers; Python additionally detects parent exit. Confirmation is
+recorded as `user_confirmation`, distinct from `pointer_inside_current_target`. It advances the
+existing task engine and reacquires the next screen. No compositor configuration is modified.

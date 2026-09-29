@@ -28,12 +28,13 @@ class PerceptionTest(unittest.TestCase):
         from PIL import Image,ImageDraw,ImageFont
         import pytesseract
         pytesseract.get_tesseract_version()
-        image=Image.new('RGB',(800,180),'white')
+        image=Image.new('RGB',(800,600),'white')
         font=ImageFont.load_default(size=48)
-        ImageDraw.Draw(image).text((140,55),'Save File',font=font,fill='black')
+        ImageDraw.Draw(image).text((140,255),'Save File',font=font,fill='black')
         stream=io.BytesIO();image.save(stream,format='PNG')
         result=perception.parse_screen({'image_base64':base64.b64encode(stream.getvalue()).decode()})
-        self.assertTrue(any('Save' in e['name'] for e in result['elements']),result)
+        self.assertTrue(any(e['name']=='Save File' for e in result['elements']),result)
+        self.assertTrue(any(e['name']=='Save' for e in result['elements']),result)
         for e in result['elements']:
             self.assertGreaterEqual(e['bounds']['x'],130)
             self.assertGreater(e['bounds']['width'],0)

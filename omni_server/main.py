@@ -26,7 +26,7 @@ def parse_screen(req):
     original = image.size
     image.thumbnail((1600, 1200))
     sx, sy = original[0] / image.width, original[1] / image.height
-    data = pytesseract.image_to_data(ImageOps.grayscale(image), output_type=pytesseract.Output.DICT, timeout=12)
+    data = pytesseract.image_to_data(ImageOps.grayscale(image), output_type=pytesseract.Output.DICT, config="--psm 11", timeout=12)
     elements = []
     # Group words into lines so controls such as 'Save As' remain matchable.
     lines = {}
@@ -36,7 +36,10 @@ def parse_screen(req):
             continue
         key = tuple(data[k][i] for k in ("block_num", "par_num", "line_num"))
         lines.setdefault(key, []).append(i)
-    for indices in list(lines.values())[:500]:
+    groups = list(lines.values())
+    # Menubars often become one OCR line. Preserve whole labels and individual words.
+    groups += [[i] for indices in lines.values() if len(indices) > 1 for i in indices]
+    for indices in groups[:500]:
         x = min(data["left"][i] for i in indices)
         y = min(data["top"][i] for i in indices)
         right = max(data["left"][i] + data["width"][i] for i in indices)

@@ -108,16 +108,18 @@ pub fn wayland() -> bool {
 }
 pub fn diagnostics() -> serde_json::Value {
     let wayland = wayland();
+    let hyprland = crate::hyprland::available();
     serde_json::json!({
         "os":std::env::consts::OS,
         "session":if cfg!(windows){"windows"}else if wayland{"wayland"}else{"x11"},
         "desktop":std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_default(),
         "hyprland":std::env::var_os("HYPRLAND_INSTANCE_SIGNATURE").is_some(),
         "global_input":if wayland{"unavailable: native Wayland input observation is not integrated"}else{"backend available; runtime initialization reported separately"},
-        "capture":if wayland{"unavailable: portal capture not integrated"}else{"on-demand monitor capture; runtime permission required"},
+        "capture":if hyprland{"grim active-window OCR, compositor logical coordinates"}else if wayland{"unavailable: portal capture not integrated"}else{"on-demand monitor capture; runtime permission required"},
         "accessibility":if cfg!(windows){"UIA exact-name lookup"}else{"AT-SPI not integrated; OCR fallback on X11"},
-        "overlay":if wayland{"unverified: compositor controls positioning and stacking"}else{"click-through native window"},
+        "overlay":if hyprland{"GTK layer-shell highlight and instruction panel; requires desktop Python dependencies"}else if wayland{"unverified: compositor controls positioning and stacking"}else{"click-through native window"},
         "perception_worker":"on-demand JSON stdio; Python/Pillow/pytesseract/Tesseract required",
+        "verification":if hyprland{"explicit user confirmation; global clicks are not observed"}else{"platform-dependent geometric hits"},
         "cloud_screenshots":false,
         "history_storage":false
     })
