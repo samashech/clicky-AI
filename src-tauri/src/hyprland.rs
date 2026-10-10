@@ -76,7 +76,16 @@ pub fn region(window: &Value) -> Result<Bounds, String> {
     }
     Ok(bounds)
 }
-pub async fn capture() -> Result<(Vec<u8>, (f64, f64)), String> {
+pub fn same_window(expected: &Value, current: &Value) -> bool {
+    expected["address"].as_str().is_some_and(|s| !s.is_empty())
+        && expected["pid"].as_u64().is_some_and(|p| p > 0)
+        && current["mapped"].as_bool() == Some(true)
+        && current["hidden"].as_bool() != Some(true)
+        && ["address", "pid", "at", "size", "monitor"]
+            .iter()
+            .all(|key| expected[*key] == current[*key])
+}
+pub async fn capture() -> Result<(Vec<u8>, (f64, f64), Value), String> {
     let window = query("activewindow").await?;
     let r = region(&window)?;
     let geometry = format!(
@@ -89,7 +98,10 @@ pub async fn capture() -> Result<(Vec<u8>, (f64, f64)), String> {
         8 * 1024 * 1024,
     )
     .await?;
-    Ok((bytes, (r.x, r.y)))
+    if !same_window(&window, &query("activewindow").await?) {
+        return Err("The application changed during capture. Focus it and try again.".into());
+    }
+    Ok((bytes, (r.x, r.y), window))
 }
 async fn desktop_python() -> Result<String, String> {
     let mut candidates = Vec::new();
@@ -122,6 +134,18 @@ async fn desktop_python() -> Result<String, String> {
 }
 pub async fn show(app: &AppHandle, step: Step, generation: u64) -> Result<(), String> {
     let bounds = step.target.as_ref().ok_or("No selected target")?.bounds;
+    let window = app
+        .state::<Runtime>()
+        .capture_window
+        .lock()
+        .unwrap()
+        .clone()
+        .ok_or("Capture context unavailable")?;
+    if !same_window(&window, &query("activewindow").await?) {
+        return Err(
+            "The application moved or changed while I was looking. Focus it and try again.".into(),
+        );
+    }
     let monitors = query("monitors").await?;
     let monitor = monitors
         .as_array()
@@ -165,7 +189,7 @@ pub async fn show(app: &AppHandle, step: Step, generation: u64) -> Result<(), St
         .write_all(
             format!(
                 "{}\n",
-                json!({"bounds":bounds,"monitor":monitor,"instruction":step.instruction})
+                json!({"bounds":bounds,"monitor":monitor,"instruction":step.instruction,"window":window})
             )
             .as_bytes(),
         )
@@ -208,12 +232,27 @@ pub async fn show(app: &AppHandle, step: Step, generation: u64) -> Result<(), St
                     crate::confirm_hyprland_step(&handle, step.id);
                     return;
                 }
+                Some("recheck") => {
+                    crate::recheck_hyprland_step(&handle, step.id);
+                    return;
+                }
+                Some("stale") => {
+                    crate::invalidate_hyprland_step(&handle, step.id);
+                }
                 Some("cancel") => {
                     crate::cancel_task(handle.clone());
                     return;
                 }
                 _ => break,
             }
+        }
+        if handle
+            .state::<Runtime>()
+            .generation
+            .load(std::sync::atomic::Ordering::SeqCst)
+            != generation
+        {
+            return;
         }
         crate::fail(
             &handle,
@@ -226,6 +265,24 @@ pub async fn show(app: &AppHandle, step: Step, generation: u64) -> Result<(), St
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn capture_context_rejects_focus_or_geometry_changes() {
+        let original = json!({"address":"0x123","pid":42,"at":[-900,0],"size":[900,700],"monitor":1,"mapped":true});
+        assert!(same_window(&original, &original));
+        for (key, value) in [
+            ("address", json!("0x456")),
+            ("pid", json!(43)),
+            ("at", json!([0, 0])),
+            ("size", json!([900, 701])),
+            ("mapped", json!(false)),
+            ("hidden", json!(true)),
+        ] {
+            let mut changed = original.clone();
+            changed[key] = value;
+            assert!(!same_window(&original, &changed), "{key}");
+        }
+        assert!(!same_window(&json!({}), &json!({})));
+    }
     #[test]
     fn capture_uses_logical_negative_origin() {
         let r = region(&json!({"at":[-1280,40],"size":[900,700],"class":"editor"})).unwrap();

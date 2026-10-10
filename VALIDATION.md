@@ -86,3 +86,19 @@ Record actual application/version/display results before upgrading any capabilit
   smoke requires its temporary fixture to retain focus and does not suppress user input.
 - Final Linux release build passed and generated deb/rpm bundles with both native Hyprland
   desktop worker scripts. No Windows implementation or hardware validation was undertaken.
+
+## Hyprland reliability update — 2026-10-10
+
+- Added window identity/geometry checks after capture, before display and every 250 ms during
+  guidance. Window changes dismiss the highlight while preserving explicit action confirmation.
+- Added Find again to re-ground the current step; stale guidance cancels its outstanding speech.
+- Native smoke passed real OCR, native layers, successful local speech output, target-window closure
+  invalidation, preserved confirmation panel and parent-exit cleanup. No microphone capture.
+- Initial native attempts failed to retain the fixture focus or show guidance; an isolated final
+  run passed. The test explicitly focuses only its own fixture; it still requires an uninterrupted
+  desktop. Optional `--diagnose` captures only ClickyAI's status panel to a temporary image.
+- Regression suite: 22 Rust tests, 12 Python tests and 3 frontend test files.
+- Window checks do not detect scrolling or layout changes inside unchanged window bounds.
+  Those still require Find again; automatic semantic action verification remains unimplemented.
+- Explicit `--guide` CLI requests now print user-facing failures to the attached terminal, including
+  when the status layer cannot initialize. Normal background mode does not print request contents.

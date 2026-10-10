@@ -7,6 +7,7 @@ import os
 import socket
 import sys
 import threading
+from app_context import same_window
 import gi
 gi.require_version('Gtk', '3.0')
 gi.require_version('GtkLayerShell', '0.1')
@@ -18,19 +19,27 @@ def emit(event):
     print(json.dumps({'event': event}), flush=True)
 
 
-def cursor():
+def query(command):
     base = os.environ.get('XDG_RUNTIME_DIR', '')
     signature = os.environ.get('HYPRLAND_INSTANCE_SIGNATURE', '')
     with socket.socket(socket.AF_UNIX) as connection:
         connection.settimeout(.15)
         connection.connect(os.path.join(base, 'hypr', signature, '.socket.sock'))
-        connection.sendall(b'j/cursorpos')
-        return json.loads(connection.recv(1024))
+        connection.sendall(('j/'+command).encode())
+        data=bytearray()
+        while len(data)<=65536:
+            part=connection.recv(4096)
+            if not part: return json.loads(data)
+            data.extend(part)
+        raise ValueError('IPC response too large')
 
 
 def main():
     request = json.loads(sys.stdin.buffer.readline(16385))
     bounds, monitor = request['bounds'], request['monitor']
+    expected = request['window']
+    if not same_window(expected,query('activewindow')):
+        emit('stale');return
     display = Gdk.Display.get_default()
     selected = next((display.get_monitor(i) for i in range(display.get_n_monitors())
                      if display.get_monitor(i).get_geometry().x == monitor['x']
@@ -91,15 +100,36 @@ def main():
     label.set_max_width_chars(56)
     label.set_width_chars(48)
     box.pack_start(label, False, False, 0)
-    note = Gtk.Label(label='After performing the action, confirm below. Clicks are not observed.')
+    note = Gtk.Label(label='Do this in your application, then confirm to continue.')
     note.set_line_wrap(True)
     note.set_max_width_chars(56)
     note.set_width_chars(48)
     box.pack_start(note, False, False, 0)
     buttons = Gtk.Box(spacing=12)
-    for title, event in [('I did this — next step', 'confirmed'), ('Cancel', 'cancel')]:
+    finished = [False]
+    invalidated = [False]
+    def invalidate():
+        if finished[0] or invalidated[0]: return False
+        invalidated[0] = True
+        overlay.hide()
+        note.set_text('The screen changed. Confirm if you completed the action, or choose Find again.')
+        emit('stale')
+        return False
+    def act(event):
+        if finished[0]: return False
+        if event == 'confirmed' and not invalidated[0]:
+            try:
+                if not same_window(expected, query('activewindow')): return invalidate()
+            except (OSError, ValueError): return invalidate()
+        finished[0] = True
+        overlay.hide()
+        panel.hide()
+        emit(event)
+        Gtk.main_quit()
+        return False
+    for title, event in [('I did this — next step', 'confirmed'), ('Find again', 'recheck'), ('Cancel', 'cancel')]:
         button = Gtk.Button(label=title)
-        button.connect('clicked', lambda widget, event=event: emit(event))
+        button.connect('clicked', lambda widget, event=event: act(event))
         buttons.pack_start(button, True, True, 0)
     box.pack_start(buttons, False, False, 0)
     panel.add(box)
@@ -107,6 +137,7 @@ def main():
     panel.show_all()
     emit('ready')
     def update(value):
+        if finished[0] or invalidated[0] or value == point[0]: return False
         point[0] = value
         area.queue_draw()
         return False
@@ -114,9 +145,20 @@ def main():
     def poll():
         # Runs only while this guidance process exists, never while Clicky is idle.
         import time
-        while os.getppid() == parent:
-            try: GLib.idle_add(update, cursor())
-            except (OSError, ValueError): pass
+        next_check=0
+        while os.getppid() == parent and not finished[0]:
+            if invalidated[0]:
+                time.sleep(.25);continue
+            try:
+                if time.monotonic()>=next_check:
+                    if not same_window(expected,query('activewindow')):
+                        GLib.idle_add(invalidate)
+                        time.sleep(.25);continue
+                    next_check=time.monotonic()+.25
+                GLib.idle_add(update, query('cursorpos'))
+            except (OSError, ValueError):
+                GLib.idle_add(invalidate)
+                time.sleep(.25);continue
             time.sleep(1/30)
         GLib.idle_add(Gtk.main_quit)
     threading.Thread(target=poll, daemon=True).start()

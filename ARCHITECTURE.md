@@ -200,3 +200,14 @@ at 30 Hz only during guidance. Status messages use a non-focus-stealing native l
 Rust owns and cancels both workers; Python additionally detects parent exit. Confirmation is
 recorded as `user_confirmation`, distinct from `pointer_inside_current_target`. It advances the
 existing task engine and reacquires the next screen. No compositor configuration is modified.
+
+## Stale-target protection
+
+Hyprland capture retains the source window address, process ID, logical bounds and monitor.
+The active window must still match after capture and before guidance is shown. While guidance
+is visible, the native worker checks that context every 250 ms (no OCR, screenshots or model
+calls). Moving, resizing, closing or switching away dismisses the old highlight and stops its
+speech. The instruction panel remains so an expected window change can still be explicitly
+confirmed. **Find again** cancels outstanding work and re-grounds the same step from fresh pixels.
+This does not detect controls moving within an otherwise unchanged window; semantic verification
+remains separate. Cursor redraws are skipped when its position has not changed.

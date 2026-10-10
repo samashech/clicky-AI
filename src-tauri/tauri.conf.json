@@ -72,7 +72,8 @@
       "../voice/portal.py": "voice/portal.py",
       "../voice/local_tts.py": "voice/local_tts.py",
       "../desktop/hyprland_overlay.py": "desktop/hyprland_overlay.py",
-      "../desktop/hyprland_status.py": "desktop/hyprland_status.py"
+      "../desktop/hyprland_status.py": "desktop/hyprland_status.py",
+      "../desktop/app_context.py": "desktop/app_context.py"
     }
   }
 }

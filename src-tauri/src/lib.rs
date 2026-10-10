@@ -38,6 +38,7 @@ struct Runtime {
     input_error: Mutex<Option<String>>,
     shortcut_error: Mutex<Option<String>>,
     model_calls: AtomicU64,
+    capture_window: Mutex<Option<serde_json::Value>>,
     frame_cache: Mutex<Option<FrameCache>>,
 }
 fn publish(app: &AppHandle) {
@@ -70,6 +71,7 @@ fn stop(app: &AppHandle) {
     }
     hide_overlay(app);
     *state.frame_cache.lock().unwrap() = None;
+    *state.capture_window.lock().unwrap() = None;
     state.router.clear();
 }
 
@@ -168,7 +170,7 @@ async fn ground(app: AppHandle) {
         if hyprland::available(){hyprland::status(&app,None);}
         if let Some(hud)=app.get_webview_window("indicator"){let _=hud.hide();}
         tokio::time::sleep(std::time::Duration::from_millis(80)).await;
-        let (image,origin)=if hyprland::available(){hyprland::capture().await?}else{tauri::async_runtime::spawn_blocking(move||perception::capture(pointer)).await.map_err(|e|e.to_string())??};
+        let (image,origin)=if hyprland::available(){let (image,origin,window)=hyprland::capture().await?; *state.capture_window.lock().unwrap()=Some(window); (image,origin)}else{tauri::async_runtime::spawn_blocking(move||perception::capture(pointer)).await.map_err(|e|e.to_string())??};
         interaction::phase(&app,Phase::AnalyzingScreen,"Reading visible controls…");
         let script=if cfg!(debug_assertions){std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../omni_server/main.py")}else{app.path().resource_dir().map_err(|e|e.to_string())?.join("perception/main.py")};
         let cached={let cache=state.frame_cache.lock().unwrap();cache.as_ref().filter(|c|c.origin==origin && c.image==image).map(|c|c.elements.clone())};
@@ -287,6 +289,44 @@ async fn ground(app: AppHandle) {
     );
     publish(&app);
 }
+fn invalidate_hyprland_step(app: &AppHandle, step_id: usize) {
+    let state = app.state::<Runtime>();
+    {
+        let mut guard = state.task.lock().unwrap();
+        let Some(task) = guard.as_mut() else {
+            return;
+        };
+        if task.status != Status::Waiting
+            || task.steps.get(task.current).is_none_or(|s| s.id != step_id)
+        {
+            return;
+        }
+        task.message =
+            "Screen changed; highlight dismissed. Confirm your action or find the target again."
+                .into();
+    }
+    if let Some(job) = state.job.lock().unwrap().take() {
+        job.abort();
+    }
+    interaction::phase(
+        app,
+        Phase::WaitingForUser,
+        "Screen changed · confirm or find again",
+    );
+    publish(app);
+}
+fn recheck_hyprland_step(app: &AppHandle, step_id: usize) {
+    let state = app.state::<Runtime>();
+    let waiting = state.task.lock().unwrap().as_ref().is_some_and(|t| {
+        t.status == Status::Waiting && t.steps.get(t.current).is_some_and(|s| s.id == step_id)
+    });
+    if !waiting {
+        return;
+    }
+    stop(app);
+    interaction::phase(app, Phase::Verifying, "Reading the target again…");
+    schedule(app);
+}
 fn confirm_hyprland_step(app: &AppHandle, step_id: usize) {
     let state = app.state::<Runtime>();
     let advanced = state
@@ -317,6 +357,14 @@ fn confirm_hyprland_step(app: &AppHandle, step_id: usize) {
     }
 }
 fn fail(app: &AppHandle, message: String) {
+    // Explicit CLI requests need visible errors even if the desktop indicator cannot start.
+    if std::env::args().any(|arg| arg == "--guide") {
+        eprintln!("ClickyAI: {message}");
+    }
+    // Stop speech as well as visuals when the grounding is no longer trustworthy.
+    if let Some(job) = app.state::<Runtime>().job.lock().unwrap().take() {
+        job.abort();
+    }
     if let Some(task) = app.state::<Runtime>().task.lock().unwrap().as_mut() {
         task.status = Status::Uncertain;
         task.message = message.clone();

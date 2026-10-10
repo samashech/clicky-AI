@@ -155,3 +155,10 @@ work, and [VALIDATION.md](VALIDATION.md) for executed checks and unverified acce
 
 Implementation references: [Tauri shortcuts](https://v2.tauri.app/plugin/global-shortcut/),
 [Hyprland IPC capabilities](https://wiki.hypr.land/Configuring/Using-hyprctl/).
+
+### When the screen changes
+
+On Hyprland, moving/resizing the application or switching windows dismisses the old highlight
+and stops its speech. The instruction popup stays available: confirm if you completed the action,
+or choose **Find again** to re-read the active application for the current step. Changes inside
+an unchanged window (such as scrolling) are not automatically detected yet; use **Find again**.
