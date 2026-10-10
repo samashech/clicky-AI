@@ -53,3 +53,13 @@ $('voice-form').addEventListener('submit',async event=>{
 $('refresh-diagnostics').addEventListener('click',async()=>{try{$('voice-capabilities').textContent=JSON.stringify(await invoke('voice_diagnostics'),null,2);}catch(error){$('voice-capabilities').textContent=String(error);}});
 
 $('portal-hotkey').addEventListener('click',async()=>{await invoke('enable_wayland_hotkey');status('Shortcut request sent to the desktop. Approve its prompt if shown, then refresh Diagnostics.');});
+
+const vision=await invoke('vision_settings');
+$('vision-enabled').checked=vision.enabled;
+$('vision-endpoint').value=vision.endpoint;
+$('vision-model').value=vision.model;
+$('vision-form').addEventListener('submit',async event=>{
+    event.preventDefault();
+    try{await invoke('configure_vision',{config:{enabled:$('vision-enabled').checked,endpoint:$('vision-endpoint').value,model:$('vision-model').value}});status('Local vision configured. Images remain on this computer.');}
+    catch(error){status(String(error));}
+});

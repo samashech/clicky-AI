@@ -38,6 +38,8 @@ def main():
     request = json.loads(sys.stdin.buffer.readline(16385))
     bounds, monitor = request['bounds'], request['monitor']
     expected = request['window']
+    answer = request.get('action') == 'answer'
+    destination = request.get('destination')
     if not same_window(expected,query('activewindow')):
         emit('stale');return
     display = Gdk.Display.get_default()
@@ -87,6 +89,15 @@ def main():
             context.stroke()
             context.arc(tx, ty, 5, 0, math.tau)
             context.fill()
+        if destination:
+            dx,dy=destination[0]-monitor['x'],destination[1]-monitor['y']
+            context.set_source_rgba(1,.72,.2,1)
+            context.set_line_width(4)
+            context.move_to(x+w/2,y+h/2);context.line_to(dx,dy);context.stroke()
+            angle=math.atan2(dy-y-h/2,dx-x-w/2)
+            for offset in (-.55,.55):
+                context.move_to(dx,dy);context.line_to(dx-16*math.cos(angle+offset),dy-16*math.sin(angle+offset));context.stroke()
+            context.arc(dx,dy,9,0,math.tau);context.stroke()
         return False
     area.connect('draw', draw)
     overlay.connect('realize', lambda window: window.get_window().input_shape_combine_region(cairo.Region(), 0, 0))
@@ -100,7 +111,7 @@ def main():
     label.set_max_width_chars(56)
     label.set_width_chars(48)
     box.pack_start(label, False, False, 0)
-    note = Gtk.Label(label='Do this in your application, then confirm to continue.')
+    note = Gtk.Label(label=('Visual assessment of your captured region; it may be mistaken.' if answer else ('AI suggested target — check it before acting. '+(request.get('expected_result') or '') if request.get('source')=='vision' else 'Do this in your application, then confirm to continue.')))
     note.set_line_wrap(True)
     note.set_max_width_chars(56)
     note.set_width_chars(48)
@@ -117,7 +128,7 @@ def main():
         return False
     def act(event):
         if finished[0]: return False
-        if event == 'confirmed' and not invalidated[0]:
+        if event == 'confirmed' and not answer and not invalidated[0]:
             try:
                 if not same_window(expected, query('activewindow')): return invalidate()
             except (OSError, ValueError): return invalidate()
@@ -127,13 +138,14 @@ def main():
         emit(event)
         Gtk.main_quit()
         return False
-    for title, event in [('I did this — next step', 'confirmed'), ('Find again', 'recheck'), ('Cancel', 'cancel')]:
+    choices=[('Close','confirmed'),('Inspect again','recheck')] if answer else [('I did this — next step','confirmed'),('Find again','recheck'),('Cancel','cancel')]
+    for title, event in choices:
         button = Gtk.Button(label=title)
         button.connect('clicked', lambda widget, event=event: act(event))
         buttons.pack_start(button, True, True, 0)
     box.pack_start(buttons, False, False, 0)
     panel.add(box)
-    overlay.show_all()
+    if not answer: overlay.show_all()
     panel.show_all()
     emit('ready')
     def update(value):
@@ -147,7 +159,7 @@ def main():
         import time
         next_check=0
         while os.getppid() == parent and not finished[0]:
-            if invalidated[0]:
+            if answer or invalidated[0]:
                 time.sleep(.25);continue
             try:
                 if time.monotonic()>=next_check:

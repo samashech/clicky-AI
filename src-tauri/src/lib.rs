@@ -5,6 +5,7 @@ mod platform;
 mod provider;
 mod session;
 mod task;
+mod vision;
 mod voice;
 use session::Phase;
 use std::sync::{
@@ -22,6 +23,9 @@ struct FrameCache {
 }
 #[derive(Default)]
 struct Runtime {
+    vision_config: Mutex<vision::Config>,
+    vision_session: Mutex<Option<vision::Session>>,
+    vision_engine: vision::Engine,
     task: Mutex<Option<Task>>,
     session: Mutex<session::Session>,
     voice_config: Mutex<voice::Config>,
@@ -78,6 +82,8 @@ fn stop(app: &AppHandle) {
 #[tauri::command]
 fn cancel_task(app: AppHandle) {
     stop(&app);
+    *app.state::<Runtime>().vision_session.lock().unwrap() = None;
+    app.state::<Runtime>().vision_engine.clear();
     if let Some(task) = app.state::<Runtime>().task.lock().unwrap().as_mut() {
         task.status = Status::Cancelled;
     }
@@ -117,7 +123,7 @@ fn configure(app: AppHandle, config: provider::Config, hotkey: String) -> Result
 }
 #[tauri::command]
 fn start_task(app: AppHandle, goal: String, mode: String) -> Result<(), String> {
-    if !["guide", "explain", "teach"].contains(&mode.as_str()) {
+    if !["guide", "explain", "teach", "inspect", "visual"].contains(&mode.as_str()) {
         return Err("Invalid guidance mode".into());
     }
     cancel_task(app.clone());
@@ -143,6 +149,12 @@ fn schedule(app: &AppHandle) {
 }
 async fn ground(app: AppHandle) {
     let state = app.state::<Runtime>();
+    if state.vision_session.lock().unwrap().is_some() {
+        if let Err(error) = vision::ground(app.clone()).await {
+            fail(&app, error);
+        }
+        return;
+    }
     let generation = state.generation.load(Ordering::SeqCst);
     let (instruction, hint, needs_plan) = {
         let mut guard = state.task.lock().unwrap();
@@ -329,6 +341,13 @@ fn recheck_hyprland_step(app: &AppHandle, step_id: usize) {
 }
 fn confirm_hyprland_step(app: &AppHandle, step_id: usize) {
     let state = app.state::<Runtime>();
+    let visual_step = state
+        .task
+        .lock()
+        .unwrap()
+        .as_ref()
+        .and_then(|t| t.steps.get(t.current))
+        .cloned();
     let advanced = state
         .task
         .lock()
@@ -350,7 +369,30 @@ fn confirm_hyprland_step(app: &AppHandle, step_id: usize) {
         .unwrap()
         .as_ref()
         .is_some_and(|t| t.status == Status::Complete);
-    if complete {
+    let continue_visual = {
+        let mut guard = state.vision_session.lock().unwrap();
+        if let (Some(session), Some(step)) = (guard.as_mut(), visual_step) {
+            if step.expected_action != "answer" {
+                session.history.push(format!(
+                    "User confirmed: {} Expected: {}",
+                    step.instruction,
+                    step.expected_result.unwrap_or_default()
+                ));
+                if session.history.len() > 6 {
+                    session.history.remove(0);
+                }
+                true
+            } else {
+                *guard = None;
+                false
+            }
+        } else {
+            false
+        }
+    };
+    if continue_visual {
+        schedule(app);
+    } else if complete {
         interaction::finish(app);
     } else {
         schedule(app);
@@ -396,6 +438,13 @@ pub fn run() {
         .setup(|app| {
             interaction::tray(app)?;
             interaction::portal(app.handle(), false);
+            if std::env::var("CLICKY_VISION_ENABLED").as_deref() == Ok("1") {
+                let mut config = vision::Config::default();
+                config.enabled = true;
+                if config.validate().is_ok() {
+                    *app.state::<Runtime>().vision_config.lock().unwrap() = config;
+                }
+            }
             let state = app.state::<Runtime>();
             if !platform::wayland() {
                 match app.global_shortcut().register("Alt+X") {
@@ -486,12 +535,20 @@ pub fn run() {
             // Explicit CLI fallback for testing or desktops without a shortcut portal.
             // Activation remains silent unless the user supplied --guide.
             let args: Vec<String> = std::env::args().collect();
-            if let Some(index) = args.iter().position(|arg| arg == "--guide") {
+            if let Some(index) = args
+                .iter()
+                .position(|arg| ["--guide", "--inspect", "--visual"].contains(&arg.as_str()))
+            {
                 if let Some(goal) = args.get(index + 1).cloned() {
                     let handle = app.handle().clone();
+                    let mode = match args[index].as_str() {
+                        "--inspect" => "inspect",
+                        "--visual" => "visual",
+                        _ => "guide",
+                    };
                     tauri::async_runtime::spawn(async move {
                         tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-                        if let Err(error) = start_task(handle.clone(), goal, "guide".into()) {
+                        if let Err(error) = start_task(handle.clone(), goal, mode.into()) {
                             fail(&handle, error);
                         }
                     });
@@ -517,6 +574,8 @@ pub fn run() {
             interaction::configure_voice,
             interaction::voice_settings,
             interaction::voice_diagnostics,
+            vision::configure_vision,
+            vision::vision_settings,
             interaction::enable_wayland_hotkey
         ])
         .run(tauri::generate_context!())

@@ -13,6 +13,14 @@ pub fn available() -> bool {
     cfg!(target_os = "linux") && std::env::var_os("HYPRLAND_INSTANCE_SIGNATURE").is_some()
 }
 async fn output(program: &str, args: &[&str], limit: u64) -> Result<Vec<u8>, String> {
+    output_for(program, args, limit, 8).await
+}
+async fn output_for(
+    program: &str,
+    args: &[&str],
+    limit: u64,
+    seconds: u64,
+) -> Result<Vec<u8>, String> {
     let mut child = tokio::process::Command::new(program)
         .args(args)
         .stdout(Stdio::piped())
@@ -20,7 +28,7 @@ async fn output(program: &str, args: &[&str], limit: u64) -> Result<Vec<u8>, Str
         .kill_on_drop(true)
         .spawn()
         .map_err(|_| format!("Install {program} for Hyprland perception"))?;
-    let result = tokio::time::timeout(Duration::from_secs(8), async {
+    let result = tokio::time::timeout(Duration::from_secs(seconds), async {
         let mut bytes = Vec::new();
         child
             .stdout
@@ -189,7 +197,7 @@ pub async fn show(app: &AppHandle, step: Step, generation: u64) -> Result<(), St
         .write_all(
             format!(
                 "{}\n",
-                json!({"bounds":bounds,"monitor":monitor,"instruction":step.instruction,"window":window})
+                json!({"bounds":bounds,"monitor":monitor,"instruction":step.instruction,"window":window,"destination":step.destination,"action":step.expected_action,"expected_result":step.expected_result,"source":step.target.as_ref().map(|t|t.source.clone())})
             )
             .as_bytes(),
         )
@@ -351,4 +359,56 @@ pub fn status(app: &AppHandle, message: Option<String>) {
         }
     });
     *state.status_job.lock().unwrap() = Some(job);
+}
+
+/// User-drawn region only; selecting outside the focused application is rejected.
+pub async fn capture_selected() -> Result<(Vec<u8>, (f64, f64), Value), String> {
+    let window = query("activewindow").await?;
+    let active = region(&window)?;
+    let selected=output_for("slurp",&["-f","%x,%y %wx%h"],256,45).await.map_err(|_|"Region selection cancelled or unavailable. Install slurp, then select within the active application.".to_string())?;
+    let text = std::str::from_utf8(&selected)
+        .map_err(|_| "Invalid selection")?
+        .trim();
+    let parts: Vec<_> = text
+        .split([',', ' ', 'x'])
+        .filter(|s| !s.is_empty())
+        .collect();
+    if parts.len() != 4 {
+        return Err("Invalid selection geometry".into());
+    }
+    let v: Vec<f64> = parts
+        .iter()
+        .map(|s| s.parse::<f64>())
+        .collect::<Result<_, _>>()
+        .map_err(|_| "Invalid selection geometry")?;
+    let r = Bounds {
+        x: v[0],
+        y: v[1],
+        width: v[2],
+        height: v[3],
+    };
+    if !r.valid()
+        || r.width < 8.
+        || r.height < 8.
+        || r.x < active.x
+        || r.y < active.y
+        || r.x + r.width > active.x + active.width
+        || r.y + r.height > active.y + active.height
+    {
+        return Err("Select a region inside the active application's window.".into());
+    }
+    let geometry = format!(
+        "{},{} {}x{}",
+        r.x as i64, r.y as i64, r.width as u64, r.height as u64
+    );
+    let bytes = output(
+        "grim",
+        &["-s", "1", "-g", &geometry, "-t", "png", "-"],
+        8 * 1024 * 1024,
+    )
+    .await?;
+    if !same_window(&window, &query("activewindow").await?) {
+        return Err("The selected application changed. Please select again.".into());
+    }
+    Ok((bytes, (r.x, r.y), window))
 }

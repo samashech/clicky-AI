@@ -150,6 +150,26 @@ pub fn begin(app: &AppHandle, goal: &str, mode: &str) -> Result<(), String> {
     escape(app, true);
     let goal = crate::task::normalize_voice_goal(goal);
     let task = Task::new(state.generation.load(Ordering::SeqCst), &goal, mode)?;
+    let inspect = mode == "inspect" || crate::vision::inspection_goal(&goal);
+    let visual = inspect
+        || mode == "visual"
+        || (task.needs_plan && state.vision_config.lock().unwrap().enabled);
+    if visual && !crate::hyprland::available() {
+        return Err(
+            "Local visual understanding currently requires the Hyprland capture backend.".into(),
+        );
+    }
+    *state.vision_session.lock().unwrap() = if visual {
+        Some(crate::vision::Session {
+            goal: goal.clone(),
+            inspect,
+            history: Vec::new(),
+            requests: 0,
+        })
+    } else {
+        None
+    };
+    state.vision_engine.clear();
     *state.task.lock().unwrap() = Some(task);
     state.model_calls.store(0, Ordering::SeqCst);
     Ok(())
