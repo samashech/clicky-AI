@@ -400,7 +400,7 @@ fn confirm_hyprland_step(app: &AppHandle, step_id: usize) {
 }
 fn fail(app: &AppHandle, message: String) {
     // Explicit CLI requests need visible errors even if the desktop indicator cannot start.
-    if std::env::args().any(|arg| arg == "--guide") {
+    if std::env::args().any(|arg| matches!(arg.as_str(), "--guide" | "--visual" | "--inspect")) {
         eprintln!("ClickyAI: {message}");
     }
     // Stop speech as well as visuals when the grounding is no longer trustworthy.

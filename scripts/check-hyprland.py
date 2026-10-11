@@ -8,6 +8,7 @@ from pathlib import Path
 import subprocess
 import sys
 import time
+import tempfile
 
 ROOT=Path(__file__).resolve().parents[1]
 FIXTURE='''import gi
@@ -32,6 +33,10 @@ def main():
     python=next(p for p in candidates if subprocess.run([p,'-c','import gi,cairo'],capture_output=True,timeout=5).returncode==0)
     fixture=subprocess.Popen([python,'-c',FIXTURE])
     app=None
+    log_file = tempfile.TemporaryFile(mode="w+b")
+    def read_log():
+        log_file.seek(0)
+        return log_file.read().decode(errors="replace")
     try:
         time.sleep(2)
         clients=json.loads(subprocess.check_output(['hyprctl','-j','clients']))
@@ -40,11 +45,16 @@ def main():
         time.sleep(.25)
         active=json.loads(subprocess.check_output(['hyprctl','-j','activewindow']))
         assert active.get('title')=='Clicky OCR validation','Fixture must be focused for the test'
-        app=subprocess.Popen([str(ROOT/'src-tauri/target/debug/tauri-app'),'--guide','Click Export'],stdout=subprocess.DEVNULL,stderr=subprocess.PIPE)
+        visual = '--vision' in sys.argv
+        env = os.environ.copy()
+        if visual:
+            assert env.get('CLICKY_VISION_ENDPOINT') and env.get('CLICKY_VISION_MODEL'), 'Set the local vision endpoint and model explicitly'
+            env['CLICKY_VISION_ENABLED'] = '1'
+        app=subprocess.Popen([str(ROOT/'src-tauri/target/debug/tauri-app'),'--visual' if visual else '--guide','Click Export'],env=env,stdout=subprocess.DEVNULL,stderr=log_file)
         time.sleep(1)
         address=active['address']
         focus(address)
-        deadline=time.monotonic()+30
+        deadline=time.monotonic()+(140 if visual else 30)
         captured=False
         while time.monotonic()<deadline:
             layers=subprocess.check_output(['hyprctl','-j','layers']).decode()
@@ -57,8 +67,8 @@ def main():
                                 subprocess.run(['grim','-g',f'{x},{y} {w}x{h}','/tmp/clicky-status-diagnostic.png'],check=True)
                                 captured=True
             if 'clickyai-guide' in layers and 'clickyai-instruction' in layers:
-                # Real target geometry must be obtained by the app's OCR pipeline.
-                print(json.dumps({'real_capture_ocr_guidance':True,'layer_shell_guide':True,'instruction_popup':True,'microphone_used':False}))
+                # Geometry comes from the real OCR or configured local-vision pipeline.
+                print(json.dumps({'real_capture_ocr_guidance':not visual,'local_vision_guidance':visual,'layer_shell_guide':True,'instruction_popup':True,'microphone_used':False}))
                 time.sleep(4)
                 fixture.terminate();fixture.wait(timeout=5)
                 expires=time.monotonic()+4
@@ -71,22 +81,25 @@ def main():
                 assert app.poll() is None,'Closing the target application must not exit ClickyAI'
                 print(json.dumps({'closed_target_invalidated':True}))
                 app.terminate();app.wait(timeout=5)
-                log=app.stderr.read().decode()
+                log=read_log()
                 assert '\"event\":\"speech_finished\"' in log and '\"success\":true' in log, 'Speech output did not complete successfully: '+log
                 time.sleep(1)
                 remaining=subprocess.check_output(['hyprctl','-j','layers']).decode()
                 assert 'clickyai-guide' not in remaining and 'clickyai-instruction' not in remaining, 'Overlay worker survived parent exit'
                 print(json.dumps({'speech_output_completed':True,'overlay_cleaned_up':True}))
                 return
-            if app.poll() is not None: raise RuntimeError(app.stderr.read().decode())
+            log = read_log()
+            if app.poll() is not None or 'ClickyAI: ' in log:
+                raise RuntimeError(log)
             time.sleep(.25)
         app.terminate(); app.wait(timeout=5)
-        raise RuntimeError('Native guidance did not appear within 30 seconds: '+app.stderr.read().decode())
+        raise RuntimeError('Native guidance did not appear before the deadline: '+read_log())
     finally:
         if app:
             app.terminate()
             try:app.wait(timeout=5)
             except subprocess.TimeoutExpired:app.kill();app.wait()
         fixture.terminate();fixture.wait(timeout=5)
+        log_file.close()
 
 if __name__=='__main__':main()

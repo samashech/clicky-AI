@@ -211,6 +211,8 @@ pub fn is_direct_request(goal: &str) -> bool {
         "help me create ",
         "help me make ",
         "help me crop ",
+        "help me trim ",
+        "help me edit ",
         "teach ",
         "show me how ",
     ]

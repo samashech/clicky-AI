@@ -102,3 +102,38 @@ Record actual application/version/display results before upgrading any capabilit
   Those still require Find again; automatic semantic action verification remains unimplemented.
 - Explicit `--guide` CLI requests now print user-facing failures to the attached terminal, including
   when the status layer cannot initialize. Normal background mode does not print request contents.
+
+
+## Local vision hardening — 2026-10-11
+
+- Tested the actual locally installed `qwen3-vl:2b-instruct` via loopback Ollama with cloud disabled.
+  A Northern Cardinal photograph was correctly identified in approximately 1.9 seconds (warm model).
+  The live test also checked that the identical request reused its response without another request.
+  Fixture: William H. Majoros, CC BY-SA 3.0,
+  https://commons.wikimedia.org/wiki/File:Northern_Cardinal_male.jpg (downloaded to /tmp, not bundled).
+- The first instruct-model test attached action geometry to an inspection answer and was rejected.
+  Inspection now has a separate prompt and schema that forbids actions and requires null geometry.
+- Schema string limits prevent repeated evidence text consuming the entire output budget.
+  Removed debug logging of the complete Ollama response, including thinking/context fields.
+- Visual target coordinates explicitly use normalized opposite corners, converted to desktop bounds.
+  Regression coverage includes lower-right image boundaries and unchanged-frame refusal.
+- Standard suite: 28 Rust tests passed, one opt-in live-model test excluded from normal execution;
+  the bird test was executed separately and passed. Twelve Python tests and three frontend files passed.
+- `cargo check` and debug Tauri build passed. Existing screenshots dependency future-compatibility
+  warning remains.
+- Synthetic video timeline trimming did NOT pass: the model produced a low-confidence/inconsistent
+  instruction. Clicky refused it. This is not successful video-editing validation.
+- New `scripts/check-hyprland.py --vision` exercises native model guidance with explicit endpoint/model
+  environment variables. Attempts in this session failed target geometry validation and then lacked
+  active-window geometry. No native visual-model overlay pass is claimed.
+- The smoke harness now uses a temporary log file instead of waiting indefinitely for inherited stderr
+  pipes, and exits early on application errors. No microphone was used in these tests.
+- Photoshop, real YouTube identification, live microphone activation and arbitrary editing tutorials
+  remain unverified. The application is not production-complete.
+
+- Final existing OCR native smoke passed: real capture/OCR, guide and instruction layers, speech
+  playback completion, stale-target invalidation and overlay cleanup. This pass does not use vision.
+- Final vision-native attempt still rejected target geometry after the corner-contract change.
+  The coordinate convention alone did not resolve small-model grounding reliability.
+- Final `npm run tauri build` passed and produced the Linux executable plus deb/rpm bundles.
+  This is build validation, not installer installation or Arch dependency provisioning.

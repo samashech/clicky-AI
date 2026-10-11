@@ -211,3 +211,25 @@ speech. The instruction panel remains so an expected window change can still be 
 confirmed. **Find again** cancels outstanding work and re-grounds the same step from fresh pixels.
 This does not detect controls moving within an otherwise unchanged window; semantic verification
 remains separate. Cursor redraws are skipped when its position has not changed.
+
+
+## Opt-in local visual reasoning
+
+`vision.rs` integrates inspection and iterative visual guidance into the existing task runtime.
+Inspection uses `slurp` to select a region within the active Hyprland window; guidance uses the
+active-window capture. Images are compressed to JPEG, bounded to 960 pixels on their longest side,
+and sent only to an explicitly configured HTTP loopback Ollama endpoint (no proxy or redirects).
+Inference is asynchronous and stops with the task job. The local Ollama server may continue its
+already accepted inference after the client disconnects.
+
+Inspection uses an answer-only schema with null action geometry. Guidance validates click/drag
+bounds, expected results and a minimum self-reported confidence. Malformed, oversized and uncertain
+responses fail without automatic image retransmission. A compact six-confirmation history replaces
+conversation replay. Exact request caching avoids duplicate inference; a repeated frame with changed
+confirmation state cannot advance. This is byte-level deduplication, not perceptual hashing.
+
+The resulting `Step` is the common source for native popup, highlight/drag path and speech.
+Hyprland confirmation schedules fresh visual assessment for actionable steps; closing an answer
+ends the session. Clarifications currently require a new request. Twelve successful uncached
+requests bound a visual session. Manual confirmation and a model's fresh assessment are not proof
+that an application operation succeeded. No application-specific Photoshop adapter is implemented.

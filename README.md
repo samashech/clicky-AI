@@ -14,7 +14,7 @@ Install Node.js, Rust and the Tauri native build prerequisites. On Windows, inst
 C++ Build Tools and WebView2. On Arch, the native dependencies include `base-devel`, `webkit2gtk-4.1`,
 `openssl`, `librsvg`, `libxdo`, `libxtst`, `libxcb`, `libxrandr`, `dbus`,
 `libayatana-appindicator`, `portaudio` and `espeak-ng`. Hyprland guidance additionally needs
-`grim`, `gtk-layer-shell`, `python-gobject` and `python-cairo` (system Python).
+`grim`, `slurp`, `gtk-layer-shell`, `python-gobject` and `python-cairo` (system Python).
 
 For OCR, install Python, the Tesseract executable plus English language data, then:
 
@@ -62,7 +62,8 @@ There is no startup dashboard. Settings and the optional typed-request fallback 
    This is explicit user confirmation, not automatic click verification. Windows/X11 use geometric
    click verification. Explicit sequences such as “Click File then click Open”
    continue without another activation. Broad goals require a configured reasoning model, which
-   can generate bounded click-only plans; dragging, typing and arbitrary tutorials are not implemented.
+   can generate bounded click-only plans. Experimental local visual guidance additionally supports
+   proposed drag paths; arbitrary tutorials and automatic semantic verification remain unfinished.
 6. Completion returns to background. Alt+X again cancels; Escape cancels on Windows/X11 during an
    active session. The indicator also has a cancel button. Cancellation stops capture, speech and work.
 
@@ -162,3 +163,43 @@ On Hyprland, moving/resizing the application or switching windows dismisses the 
 and stops its speech. The instruction popup stays available: confirm if you completed the action,
 or choose **Find again** to re-read the active application for the current step. Changes inside
 an unchanged window (such as scrolling) are not automatically detected yet; use **Find again**.
+
+## Experimental local image understanding (Hyprland)
+
+Local vision can answer questions about a selected image region and propose one visual editing
+step at a time. It is opt-in and uses a loopback Ollama endpoint; no cloud fallback exists.
+Install `slurp` for region selection. Pause a video before asking about a bird or other object,
+then select the relevant region inside the active application when the selection crosshair appears.
+The answer is spoken and displayed in a small native popup.
+
+The locally tested model is **`qwen3-vl:2b-instruct`**, not the default `qwen3-vl:2b` tag.
+The default tag returned no usable answer in testing. Start a dedicated local server:
+
+```sh
+OLLAMA_MODELS="$PWD/.models/ollama" OLLAMA_HOST=127.0.0.1:11535 OLLAMA_NO_CLOUD=1 ollama serve
+```
+
+In another terminal, install the model once and launch Clicky with vision enabled:
+
+```sh
+OLLAMA_HOST=127.0.0.1:11535 ollama pull qwen3-vl:2b-instruct
+CLICKY_VISION_ENABLED=1 \
+CLICKY_VISION_ENDPOINT=http://127.0.0.1:11535/api/generate \
+CLICKY_VISION_MODEL=qwen3-vl:2b-instruct npm run dev
+```
+
+Alternatively enter that endpoint/model in Settings → Local visual understanding for the current
+session. Ask “What bird is this?” for region inspection. “Help me trim this video” uses experimental
+visual guidance when vision is enabled. The typed fallback also offers explicit inspection and
+visual-guidance modes. Voice and overlay consume the same task-step instruction.
+
+Visual guidance captures the active window, proposes a click or drag, and waits for explicit user
+confirmation. A fresh image is assessed before proposing another step. This is **not reliable
+semantic verification**. Identical images are not resent after a confirmation; use Find again after
+the application visibly changes. Requests have a 120-second timeout, 12-request task budget, six
+recent confirmations and a 960-pixel image dimension limit. Invalid or uncertain actions are rejected.
+
+**Evidence and limits:** one real bird photo was correctly identified locally. The synthetic video
+trimming fixture failed action validation; Photoshop trimming is not validated or ready to promise.
+Small vision models can misidentify objects and controls. Model confidence is self-reported, not a
+measured probability. No full live microphone → bird selection → spoken answer test is claimed.
